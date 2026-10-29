@@ -116,6 +116,7 @@ function cfg() {
     forum: (s.forumUrl || process.env.FORUM_URL || "https://mitmachim.top").replace(/\/$/, ""),
     user: s.botUser || process.env.BOT_USER || "",
     pass: s.botPass || process.env.BOT_PASS || "",
+    session: s.sessionCookie || process.env.FORUM_SESSION || "",
     gemini: s.geminiKey || process.env.GEMINI_KEY || "",
     model: s.model || process.env.GEMINI_MODEL || "gemini-2.5-flash",
   };
@@ -128,6 +129,7 @@ function secretsView() {
     botUser: c.user,
     model: c.model,
     hasBotPass: !!c.pass,
+    hasSession: !!c.session,
     hasGeminiKey: !!c.gemini,
     geminiKeyLast4: c.gemini ? c.gemini.slice(-4) : "",
   };
@@ -143,6 +145,12 @@ function updateSecrets(b) {
   }
   if (str(b.botUser)) s.botUser = str(b.botUser);
   if (typeof b.botPass === "string" && b.botPass) s.botPass = b.botPass; // סיסמה לא מקצצים רווחים
+  if (str(b.sessionCookie)) {
+    let v = str(b.sessionCookie).replace(/^express\.sid\s*=\s*/i, "").replace(/;.*$/, "").trim();
+    if (!v || /\s/.test(v)) throw new Error("ערך העוגייה לא תקין");
+    s.sessionCookie = v;
+  }
+  if (b.clearSession === true) delete s.sessionCookie;
   if (str(b.geminiKey)) s.geminiKey = str(b.geminiKey);
   if (str(b.model)) s.model = str(b.model);
   cookies = {};
@@ -212,6 +220,8 @@ async function req(p, opts = {}) {
   const headers = {
     "User-Agent": "Mozilla/5.0 (compatible; ForumHelperBot/3.0)",
     Cookie: cookieHeader(),
+    Origin: cfg().forum,
+    Referer: cfg().forum + "/",
     ...(opts.headers || {}),
   };
   if (csrf && opts.method && opts.method !== "GET") headers["x-csrf-token"] = csrf;
@@ -229,27 +239,64 @@ async function refreshConfig() {
 
 async function login() {
   const c = cfg();
-  if (!c.user || !c.pass) throw new Error("חסרים שם משתמש או סיסמה של חשבון הבוט");
   cookies = {};
   botUid = null;
+  if (!c.session && (!c.user || !c.pass)) throw new Error("חסרה התחברות: הזן עוגיית session (מהדף הרשמי) או שם משתמש וסיסמה");
+
+  // שלב 1: התחברות דרך הדף הרשמי (עוגיית session שהמשתמש קיבל מהפורום עצמו)
+  if (c.session) {
+    cookies = { "express.sid": c.session };
+    const uid = await currentUid();
+    if (uid) {
+      botUid = uid;
+      log(`מחובר לפורום דרך הדף הרשמי כ-uid ${botUid}`);
+      return botUid;
+    }
+    cookies = {};
+    if (!c.user || !c.pass) throw new Error("העוגייה פגה או לא תקינה. היכנס שוב בדף ההתחברות הרשמי והדבק עוגייה חדשה");
+    log("עוגיית ה-session לא תקפה, עובר להתחברות עם סיסמה");
+  }
+
+  // שלב 2: התחברות עם שם משתמש וסיסמה
+  await req("/login").catch(() => {}); // מקבל עוגיית session ראשונית
   await refreshConfig();
-  const body = new URLSearchParams({ username: c.user, password: c.pass, remember: "on" });
+  const body = new URLSearchParams({ username: c.user, password: c.pass, remember: "on", _csrf: csrf });
   const res = await req("/login", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", "x-requested-with": "XMLHttpRequest" },
     body,
   });
-  if (res.status >= 400) throw new Error(`התחברות נכשלה (${res.status}): ${(await res.text()).slice(0, 150)}`);
-  const j = await refreshConfig();
-  let uid = j.loggedInUser?.uid || j.uid;
-  if (!uid) {
-    const me = await req("/api/me");
-    if (me.ok) uid = (await me.json()).uid;
-  }
-  if (!uid) throw new Error("ההתחברות לא הצליחה (אין uid). בדוק שם משתמש וסיסמה, ושאין אימות דו-שלבי");
+  if (res.status >= 400) throw new Error(explainLoginFailure(res.status, await res.text()));
+  const uid = await currentUid();
+  if (!uid) throw new Error("ההתחברות לא הצליחה (אין uid). ייתכן שיש אימות דו-שלבי או captcha בחשבון. במקרה כזה היכנס דרך הדף הרשמי והדבק עוגיית session");
   botUid = uid;
   log(`מחובר לפורום כ-uid ${botUid}`);
   return botUid;
+}
+
+async function currentUid() {
+  try {
+    const j = await refreshConfig();
+    let uid = j.loggedInUser?.uid || j.uid;
+    if (!uid) {
+      const me = await req("/api/me");
+      if (me.ok) uid = (await me.json()).uid;
+    }
+    return Number(uid) > 0 ? uid : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function explainLoginFailure(status, text) {
+  const t = String(text || "");
+  if (/just a moment|cloudflare|cf-chl|attention required/i.test(t))
+    return `הפורום חסם את השרת (${status}, Cloudflare). היכנס דרך הדף הרשמי בדפדפן והדבק עוגיית session, או בקש מההנהלה לאשר את הבוט`;
+  if (/invalid-login|invalid-username-or-password|wrong/i.test(t)) return "שם משתמש או סיסמה שגויים";
+  if (/two-factor|2fa|tfa/i.test(t)) return "בחשבון יש אימות דו-שלבי. היכנס דרך הדף הרשמי והדבק עוגיית session";
+  if (/csrf|invalid-session/i.test(t)) return `הפורום דחה את הבקשה (CSRF, ${status}). נסה שוב`;
+  if (/too-many|rate/i.test(t) || status === 429) return "יותר מדי ניסיונות התחברות. נסה שוב מאוחר יותר";
+  return `התחברות נכשלה (${status}): ${t.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 150)}`;
 }
 
 async function getJson(p) {
@@ -360,7 +407,7 @@ let busy = false;
 async function tick() {
   const s = state.settings;
   const c = cfg();
-  if (busy || !s.enabled || !c.user || !c.pass || !c.gemini || !inSchedule()) return;
+  if (busy || !s.enabled || !(c.session || (c.user && c.pass)) || !c.gemini || !inSchedule()) return;
   busy = true;
   try {
     if (!botUid) await login();
@@ -444,7 +491,7 @@ function statusObj() {
     secrets: secretsView(),
     drafts: state.drafts,
     status: {
-      configured: { user: !!c.user, pass: !!c.pass, gemini: !!c.gemini },
+      configured: { user: !!c.user || !!c.session, pass: !!c.pass || !!c.session, gemini: !!c.gemini },
       loggedIn: !!botUid,
       inSchedule: inSchedule(),
       repliesLastHour: repliesLastHour(),
