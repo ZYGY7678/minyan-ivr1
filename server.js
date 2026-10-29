@@ -51,7 +51,7 @@ const DEFAULT_SETTINGS = {
   },
 };
 
-let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {}, lastReplyAt: 0, repliesInCycle: 0, pauseUntil: 0, replyTimestamps: [] };
+let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {}, topicActivity: [], lastReplyAt: 0, repliesInCycle: 0, pauseUntil: 0, replyTimestamps: [] };
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const clamp = (n, lo, hi, d) => {
@@ -120,6 +120,7 @@ function applyStateSnapshot(raw) {
   state.answered = raw.answered && typeof raw.answered === "object" ? raw.answered : {};
   state.drafts = Array.isArray(raw.drafts) ? raw.drafts : [];
   state.processedMentions = raw.processedMentions && typeof raw.processedMentions === "object" ? raw.processedMentions : {};
+  state.topicActivity = Array.isArray(raw.topicActivity) ? raw.topicActivity.filter((x) => x && Number(x.tid) > 0).slice(0, 30) : [];
   state.lastReplyAt = Number(raw.lastReplyAt) > 0 ? Number(raw.lastReplyAt) : 0;
   state.repliesInCycle = Number.isFinite(Number(raw.repliesInCycle)) ? Math.max(0, Number(raw.repliesInCycle)) : 0;
   state.pauseUntil = Number(raw.pauseUntil) > 0 ? Number(raw.pauseUntil) : 0;
@@ -588,6 +589,22 @@ async function topicPageForPost(tid, pid) {
   }
 }
 
+function recordTopicActivity(tid, title, status, detail = "") {
+  const id = Number(tid);
+  if (!Number.isInteger(id) || id <= 0) return;
+  const item = {
+    tid: id,
+    title: String(title || `נושא ${id}`).slice(0, 240),
+    status: String(status || "בטיפול").slice(0, 80),
+    detail: String(detail || "").slice(0, 240),
+    updatedAt: Date.now(),
+    url: `${cfg().forum}/topic/${id}`,
+  };
+  const previous = Array.isArray(state.topicActivity) ? state.topicActivity : [];
+  state.topicActivity = [item, ...previous.filter((x) => Number(x.tid) !== id)].slice(0, 30);
+  saveState();
+}
+
 async function answerTopic(tid, { force = false, replyToPid = null, forcePublish = false } = {}) {
   if (!botUid) await login();
   let topic = await getJson(`/api/topic/${tid}`);
@@ -595,16 +612,17 @@ async function answerTopic(tid, { force = false, replyToPid = null, forcePublish
     const page = await topicPageForPost(tid, replyToPid);
     if (page && Array.isArray(page.posts) && page.posts.length) topic = page;
   }
-  if (topic.locked || topic.deleted) return "הנושא נעול או נמחק";
+  recordTopicActivity(tid, topic.title, "מכין תשובה");
+  if (topic.locked || topic.deleted) { recordTopicActivity(tid, topic.title, "דולג", "הנושא נעול או נמחק"); return "הנושא נעול או נמחק"; }
   const posts = Array.isArray(topic.posts) ? topic.posts : [];
-  if (!posts.length) return "אין פוסטים בנושא";
+  if (!posts.length) { recordTopicActivity(tid, topic.title, "דולג", "אין פוסטים בנושא"); return "אין פוסטים בנושא"; }
   let last = posts[posts.length - 1];
   if (replyToPid) {
     const mentionedPost = posts.find((p) => String(p.pid) === String(replyToPid));
     if (mentionedPost) last = mentionedPost;
     else return "לא נמצא הפוסט שתויג בהתראה, דילוג כדי לא להשיב להודעה הלא נכונה";
   }
-  if (!force && String(last.uid) === String(botUid)) return "הבוט כבר ענה אחרון";
+  if (!force && String(last.uid) === String(botUid)) { recordTopicActivity(tid, topic.title, "כבר נענה", "הבוט כבר ענה אחרון"); return "הבוט כבר ענה אחרון"; }
 
   const lastIndex = posts.findIndex((p) => String(p.pid) === String(last.pid));
   const beforeTarget = lastIndex >= 0 ? posts.slice(0, lastIndex + 1) : posts;
@@ -618,10 +636,10 @@ async function answerTopic(tid, { force = false, replyToPid = null, forcePublish
   // Do not spend an AI call while an automatic post is not yet allowed.
   if (state.settings.mode !== "draft" || forcePublish) {
     const waitMs = replyTimingWaitMs();
-    if (waitMs > 0) return replyTimingMessage(waitMs);
+    if (waitMs > 0) { recordTopicActivity(tid, topic.title, "ממתין לתור", replyTimingMessage(waitMs)); return replyTimingMessage(waitMs); }
   }
   const answer = await askGemini(prompt);
-  if (!answer || answer.trim() === "SKIP") return "דילוג (המודל החליט לא לענות)";
+  if (!answer || answer.trim() === "SKIP") { recordTopicActivity(tid, topic.title, "דולג", "המודל החליט לא לענות"); return "דילוג (המודל החליט לא לענות)"; }
 
   const content = answer + state.settings.signature;
   const toPid = last.pid ? Number(last.pid) : null;
@@ -629,25 +647,85 @@ async function answerTopic(tid, { force = false, replyToPid = null, forcePublish
   if (state.settings.mode === "draft" && !forcePublish) {
     state.drafts.push({ id: crypto.randomUUID(), tid: Number(tid), title: topic.title, content, toPid, created: Date.now() });
     saveState();
+    recordTopicActivity(tid, topic.title, "טיוטה ממתינה לאישור");
     return "נשמרה טיוטה לאישור";
   }
   await postReply(tid, content, toPid);
+  recordTopicActivity(tid, topic.title, "נענה");
   return "נענה";
 }
 
 let busy = false;
 
+let mentionPollStatus = { lastCheckAt: 0, lastSuccessAt: 0, lastError: "", source: "", unreadCount: 0 };
+
 function notificationTopicId(notification) {
-  const known = Number(notification && notification.tid);
+  const known = Number(notification && (notification.tid || (notification.topic && notification.topic.tid)));
   if (Number.isInteger(known) && known > 0) return known;
-  const p = String((notification && notification.path) || "");
-  // Standard NodeBB topic path commonly includes /topic/{tid}/...
+  const p = String((notification && (notification.path || notification.url)) || "");
   let m = p.match(/\/topic\/(\d+)(?:\/|$)/i);
   if (m) return Number(m[1]);
-  // Also tolerate /topic/{slug}/{tid}/...
   m = p.match(/\/topic\/[^/]+\/(\d+)(?:\/|$)/i);
   if (m) return Number(m[1]);
   return 0;
+}
+
+function postMentionsBot(post, username) {
+  if (!post || !username) return false;
+  const candidates = [username, username.replace(/\s+/g, "_"), username.replace(/\s+/g, "-")]
+    .map((x) => x.trim().toLowerCase()).filter(Boolean);
+  const content = stripHtml([post.content, post.raw, post.text, post.topic && post.topic.title].filter(Boolean).join(" ")).toLowerCase();
+  if (candidates.some((name) => content.includes("@" + name))) return true;
+  const mentions = Array.isArray(post.mentions) ? post.mentions : [];
+  return mentions.some((m) => {
+    const value = typeof m === "string" ? m : String(m.username || m.userslug || m.name || "");
+    return candidates.some((name) => value.toLowerCase() === name || value.toLowerCase() === "@" + name);
+  });
+}
+
+async function readMentionItems() {
+  let notificationError = "";
+  try {
+    const data = await getJson("/api/notifications?page=1");
+    const notifications = Array.isArray(data.notifications) ? data.notifications : [];
+    const unreadIds = Array.isArray(data.unreadNids) ? new Set(data.unreadNids.map(String)) : null;
+    const unread = notifications.filter((n) => {
+      if (!n || !n.nid) return false;
+      const type = String(n.type || "").toLowerCase();
+      const text = String(n.bodyShort || n.bodyLong || "").toLowerCase();
+      const isMention = type.includes("mention") || text.includes("mentioned you") || text.includes("תייג");
+      if (!isMention || state.processedMentions[String(n.nid)]) return false;
+      return unreadIds ? unreadIds.has(String(n.nid)) : n.read === false;
+    });
+    mentionPollStatus = { lastCheckAt: Date.now(), lastSuccessAt: Date.now(), lastError: "", source: "notifications", unreadCount: unread.length };
+    return unread.sort((a, b) => Number(a.datetime || 0) - Number(b.datetime || 0));
+  } catch (e) {
+    notificationError = e.message;
+  }
+
+  // Fallback for installations where the notifications API returns 401 despite topic APIs working.
+  const recent = await getJson("/api/recent/posts/all?page=1");
+  const posts = Array.isArray(recent.posts) ? recent.posts : (Array.isArray(recent.recentPosts) ? recent.recentPosts : []);
+  const items = [];
+  for (const post of posts) {
+    const pid = Number(post.pid || post.id) || 0;
+    const tid = Number(post.tid || (post.topic && post.topic.tid)) || 0;
+    if (!pid || !tid || Number(post.uid) === Number(botUid) || !postMentionsBot(post, cfg().user)) continue;
+    const nid = "post:" + pid;
+    if (state.processedMentions[nid]) continue;
+    items.push({
+      nid: nid, tid: tid, pid: pid, type: "mention", read: false,
+      datetime: Number(post.timestamp || post.datetime) || Date.now(),
+      path: "/topic/" + tid, _fallback: true,
+      _title: (post.topic && post.topic.title) || post.title || ("נושא " + tid),
+    });
+  }
+  mentionPollStatus = { lastCheckAt: Date.now(), lastSuccessAt: Date.now(), lastError: notificationError, source: "recent-posts", unreadCount: items.length };
+  if (!tickMentions.lastErrorLog || Date.now() - tickMentions.lastErrorLog > 60000) {
+    log("קריאת ההתראות של NodeBB נכשלה; הופעלה סריקה חלופית של פוסטים אחרונים" + (notificationError ? ": " + notificationError : ""));
+    tickMentions.lastErrorLog = Date.now();
+  }
+  return items.sort((a, b) => Number(a.datetime || 0) - Number(b.datetime || 0));
 }
 
 async function tickMentions() {
@@ -657,22 +735,13 @@ async function tickMentions() {
       (REMOTE_STORE_CONFIGURED && !remoteStoreReady) ||
       busy || !s.enabled || s.respondToMentions === false ||
       !(c.session || (c.user && c.pass)) || !c.gemini) return;
-  if (replyTimingWaitMs() > 0) return;
 
   busy = true;
+  mentionPollStatus.lastCheckAt = Date.now();
   try {
     if (!botUid) await login();
-    const data = await getJson("/api/notifications?start=0&count=50");
-    const notifications = Array.isArray(data.notifications) ? data.notifications : [];
-    const unreadIds = Array.isArray(data.unreadNids) ? new Set(data.unreadNids.map(String)) : null;
-    const mentions = notifications.filter((n) => {
-      if (!n || !n.nid) return false;
-      const type = String(n.type || "").toLowerCase();
-      const isMention = type === "mention" || type === "mentions" || type.includes("mention");
-      if (!isMention) return false;
-      if (state.processedMentions[String(n.nid)]) return false;
-      return unreadIds ? unreadIds.has(String(n.nid)) : n.read === false;
-    }).sort((a, b) => Number(a.datetime || 0) - Number(b.datetime || 0));
+    const mentions = await readMentionItems();
+    mentionPollStatus.unreadCount = mentions.length;
 
     for (const notification of mentions) {
       const nid = String(notification.nid);
@@ -682,20 +751,18 @@ async function tickMentions() {
 
       if (!tid && pid) {
         try {
-          const response = await req(`/api/post/${encodeURIComponent(pid)}`, { redirect: "manual" });
+          const response = await req("/api/post/" + encodeURIComponent(pid), { redirect: "manual" });
           const location = response.headers.get("location") || "";
           const found = notificationTopicId({ path: location });
           if (found) tid = found;
         } catch (_) {}
       }
       if (!tid) {
-        log(`התראת תיוג ${nid} התקבלה, אבל לא הצלחתי לזהות נושא — תיבדק שוב בסבב הבא`);
+        log("התראת תיוג " + nid + " התקבלה, אבל לא הצלחתי לזהות נושא — תיבדק שוב בסבב הבא");
         continue;
       }
-      if (repliesLastHour() >= s.maxPerHour) {
-        log("מגבלת התגובות לשעה הושגה; התראת התיוג תטופל בסבב הבא");
-        break;
-      }
+      // Keep checking mentions during reply cooldowns, but do not consume them until eligible.
+      if (replyTimingWaitMs() > 0 || repliesLastHour() >= s.maxPerHour) break;
 
       state.processedMentions[nid] = Date.now();
       saveState();
@@ -709,25 +776,26 @@ async function tickMentions() {
         if (result.startsWith("לא נמצא הפוסט שתויג")) {
           delete state.processedMentions[nid];
           saveState();
-          log(`התראת תיוג ${nid} ממתינה לניסיון חוזר: ${result}`);
+          log("התראת תיוג " + nid + " ממתינה לניסיון חוזר: " + result);
           continue;
         }
         state.answered[tid] = Date.now();
+        if (notification._fallback) recordTopicActivity(tid, notification._title, result === "נענה" ? "נענה" : result);
         saveState();
-        log(`התראת תיוג ${nid}, נושא ${tid}: ${result}`);
+        log("התראת תיוג " + nid + ", נושא " + tid + ": " + result);
       } catch (e) {
         delete state.processedMentions[nid];
+        recordTopicActivity(tid, notification._title, "שגיאה", e.message);
         saveState();
-        log(`שגיאה בתגובה להתראת תיוג ${nid}: ${e.message}`);
+        log("שגיאה בתגובה להתראת תיוג " + nid + ": " + e.message);
       }
     }
   } catch (e) {
-    // Avoid flooding the log for a temporary notifications endpoint issue.
-    if (!tickMentions.lastError || Date.now() - tickMentions.lastError > 60_000) {
-      log(`בדיקת התראות תיוג נכשלה: ${e.message}`);
-      tickMentions.lastError = Date.now();
+    mentionPollStatus.lastError = e.message;
+    if (!tickMentions.lastErrorLog || Date.now() - tickMentions.lastErrorLog > 60000) {
+      log("בדיקת התראות/תיוגים נכשלה גם בסריקה החלופית: " + e.message);
+      tickMentions.lastErrorLog = Date.now();
     }
-    botUid = null;
   } finally {
     busy = false;
   }
@@ -778,6 +846,7 @@ async function tick() {
         log(`נושא ${t.tid} "${t.title}": ${result}`);
       } catch (e) {
         delete state.answered[t.tid];
+        recordTopicActivity(t.tid, t.title, "שגיאה", e.message);
         saveState();
         log(`שגיאה בנושא ${t.tid}: ${e.message}`);
       }
@@ -842,6 +911,7 @@ function statusObj() {
     settings: state.settings,
     secrets: secretsView(),
     drafts: state.drafts,
+    topicActivity: Array.isArray(state.topicActivity) ? state.topicActivity.slice(0, 30) : [],
     status: {
       storage: {
         configured: REMOTE_STORE_CONFIGURED,
@@ -862,6 +932,7 @@ function statusObj() {
         lastReplyAt: state.lastReplyAt,
       },
       answeredCount: Object.keys(state.answered).length,
+      mentionMonitor: { ...mentionPollStatus },
       serverTime: new Date().toISOString(),
       log: logBuf.slice(-40),
     },
