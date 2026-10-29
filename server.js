@@ -27,7 +27,10 @@ const DEFAULT_SETTINGS = {
   maxPerHour: 4,
   maxAgeMinutes: 180,
   pollSeconds: 120,
-  replyIntervalMinutes: 2,
+  replyCycleEnabled: true,
+  replyIntervalMinutes: 3,
+  repliesPerCycle: 10,
+  pauseAfterCycleMinutes: 30,
   solvedTags: ["נפתר", "solved"],
   signature: "\n\n---\n*תשובה זו נכתבה אוטומטית על ידי בוט.*",
   customPrompt: "",
@@ -39,7 +42,7 @@ const DEFAULT_SETTINGS = {
   },
 };
 
-let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {}, lastReplyAt: 0 };
+let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {}, lastReplyAt: 0, repliesInCycle: 0, pauseUntil: 0 };
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const clamp = (n, lo, hi, d) => {
@@ -62,7 +65,10 @@ function sanitizeSettings(s) {
   out.maxPerHour = clamp(s.maxPerHour, 1, 60, d.maxPerHour);
   out.maxAgeMinutes = clamp(s.maxAgeMinutes, 5, 10080, d.maxAgeMinutes);
   out.pollSeconds = clamp(s.pollSeconds, 30, 3600, d.pollSeconds);
+  out.replyCycleEnabled = s.replyCycleEnabled !== false;
   out.replyIntervalMinutes = clamp(s.replyIntervalMinutes, 1, 60, d.replyIntervalMinutes);
+  out.repliesPerCycle = clamp(s.repliesPerCycle, 1, 100, d.repliesPerCycle);
+  out.pauseAfterCycleMinutes = clamp(s.pauseAfterCycleMinutes, 1, 1440, d.pauseAfterCycleMinutes);
   out.solvedTags = Array.isArray(s.solvedTags) ? s.solvedTags.map(String).filter(Boolean).slice(0, 10) : d.solvedTags;
   out.signature = typeof s.signature === "string" ? s.signature.slice(0, 300) : d.signature;
   out.customPrompt = typeof s.customPrompt === "string" ? s.customPrompt.slice(0, 3000) : "";
@@ -98,6 +104,8 @@ function loadState() {
     state.drafts = Array.isArray(raw.drafts) ? raw.drafts : [];
     state.processedMentions = raw.processedMentions && typeof raw.processedMentions === "object" ? raw.processedMentions : {};
     state.lastReplyAt = Number(raw.lastReplyAt) > 0 ? Number(raw.lastReplyAt) : 0;
+    state.repliesInCycle = Number.isFinite(Number(raw.repliesInCycle)) ? Math.max(0, Number(raw.repliesInCycle)) : 0;
+    state.pauseUntil = Number(raw.pauseUntil) > 0 ? Number(raw.pauseUntil) : 0;
   } catch (_) {
     /* אין קובץ עדיין */
   }
@@ -369,15 +377,32 @@ function isSolved(t) {
   return solvedTags.some((w) => (t.title || "").includes(w));
 }
 
+function replyTimingWaitMs(now = Date.now()) {
+  if (!state.settings.replyCycleEnabled) return 0;
+  if (state.pauseUntil > now) return state.pauseUntil - now;
+  if (state.pauseUntil && state.pauseUntil <= now) {
+    state.pauseUntil = 0;
+    state.repliesInCycle = 0;
+    saveState();
+    log("הסתיימה ההפסקה המחזורית; מתחיל מחזור תגובות חדש");
+  }
+  const intervalMs = (Number(state.settings.replyIntervalMinutes) || 3) * 60_000;
+  return Math.max(0, intervalMs - (now - (Number(state.lastReplyAt) || 0)));
+}
+
+function replyTimingMessage(waitMs) {
+  const mins = Math.max(1, Math.ceil(waitMs / 60_000));
+  if (state.pauseUntil > Date.now()) {
+    return "הבוט בהפסקה מחזורית; יחזור לפרסם בעוד כ-" + mins + " דקות";
+  }
+  return "ממתין למרווח התגובה הבא (" + mins + " דקות)";
+}
+
 let publishBusy = false;
 async function postReply(tid, content, toPid) {
   if (publishBusy) throw new Error("פרסום אחר מתבצע כרגע. נסה שוב בסבב הבא");
-  const intervalMs = (Number(state.settings.replyIntervalMinutes) || 2) * 60_000;
-  const waitMs = intervalMs - (Date.now() - (Number(state.lastReplyAt) || 0));
-  if (waitMs > 0) {
-    const remaining = Math.ceil(waitMs / 60_000);
-    throw new Error(`מרווח התגובות מוגדר ל-${state.settings.replyIntervalMinutes} דקות; אפשר לפרסם שוב בעוד כ-${remaining} דקות`);
-  }
+  const waitMs = replyTimingWaitMs();
+  if (waitMs > 0) throw new Error(replyTimingMessage(waitMs));
   publishBusy = true;
   try {
     const body = { content };
@@ -391,6 +416,14 @@ async function postReply(tid, content, toPid) {
     const postedAt = Date.now();
     repliesLog.push(postedAt);
     state.lastReplyAt = postedAt;
+    if (state.settings.replyCycleEnabled) {
+      state.repliesInCycle = (Number(state.repliesInCycle) || 0) + 1;
+      if (state.repliesInCycle >= state.settings.repliesPerCycle) {
+        state.pauseUntil = postedAt + state.settings.pauseAfterCycleMinutes * 60_000;
+        const when = new Date(state.pauseUntil).toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
+        log(`הושלמו ${state.repliesInCycle} תגובות במחזור; הבוט יוצא להפסקה עד ${when}`);
+      }
+    }
     saveState();
   } finally {
     publishBusy = false;
@@ -456,6 +489,11 @@ async function answerTopic(tid, { force = false, replyToPid = null, forcePublish
   const targetUsername = last.user?.username || last.username || "";
   const prompt = `כותרת: ${topic.title}\nתגיות: ${(topic.tags || []).map((t) => t.value).join(", ")}\n\nשרשור עד ההודעה שאליה צריך להשיב:\n${ctx}\n\nענה ישירות להודעה האחרונה בשרשור שמוצג, מאת @${targetUsername}. אם יש צורך, התייחס במפורש לשאלה או לבקשה בהודעה זו.`;
 
+  // Do not spend an AI call while an automatic post is not yet allowed.
+  if (state.settings.mode !== "draft" || forcePublish) {
+    const waitMs = replyTimingWaitMs();
+    if (waitMs > 0) return replyTimingMessage(waitMs);
+  }
   const answer = await askGemini(prompt);
   if (!answer || answer.trim() === "SKIP") return "דילוג (המודל החליט לא לענות)";
 
@@ -491,6 +529,7 @@ async function tickMentions() {
   const c = cfg();
   if (busy || !s.enabled || s.respondToMentions === false ||
       !(c.session || (c.user && c.pass)) || !c.gemini) return;
+  if (replyTimingWaitMs() > 0) return;
 
   busy = true;
   try {
@@ -565,6 +604,7 @@ async function tick() {
   const s = state.settings;
   const c = cfg();
   if (busy || !s.enabled || !(c.session || (c.user && c.pass)) || !c.gemini || !inSchedule()) return;
+  if (s.mode !== "draft" && replyTimingWaitMs() > 0) return;
   busy = true;
   try {
     if (!botUid) await login();
@@ -577,6 +617,7 @@ async function tick() {
     const now = Date.now();
     for (const t of recent.topics || []) {
       if (!state.settings.enabled || !inSchedule()) break;
+      if (state.settings.mode !== "draft" && replyTimingWaitMs() > 0) break;
       if (state.answered[t.tid]) continue;
       if (t.locked || t.deleted) continue;
       if (String(t.uid) === String(botUid)) continue;
@@ -659,6 +700,11 @@ function statusObj() {
       loggedIn: !!botUid,
       inSchedule: inSchedule(),
       repliesLastHour: repliesLastHour(),
+      replyTiming: {
+        repliesInCycle: state.repliesInCycle,
+        pauseUntil: state.pauseUntil,
+        lastReplyAt: state.lastReplyAt,
+      },
       answeredCount: Object.keys(state.answered).length,
       serverTime: new Date().toISOString(),
       log: logBuf.slice(-40),
@@ -705,7 +751,13 @@ const server = http.createServer(async (rq, rs) => {
 
       if (route === "POST /control/settings") {
         const b = await readBody(rq);
+        const wasCycleEnabled = state.settings.replyCycleEnabled;
         state.settings = sanitizeSettings({ ...state.settings, ...b });
+        if (wasCycleEnabled !== state.settings.replyCycleEnabled) {
+          state.repliesInCycle = 0;
+          state.pauseUntil = 0;
+          state.lastReplyAt = 0;
+        }
         saveState();
         log("הגדרות עודכנו");
         setTimeout(tick, 500);
