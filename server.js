@@ -410,7 +410,7 @@ async function topicPageForPost(tid, pid) {
   }
 }
 
-async function answerTopic(tid, { force = false, replyToPid = null } = {}) {
+async function answerTopic(tid, { force = false, replyToPid = null, forcePublish = false } = {}) {
   if (!botUid) await login();
   let topic = await getJson(`/api/topic/${tid}`);
   if (replyToPid) {
@@ -443,7 +443,7 @@ async function answerTopic(tid, { force = false, replyToPid = null } = {}) {
   const content = answer + state.settings.signature;
   const toPid = last.pid ? Number(last.pid) : null;
 
-  if (state.settings.mode === "draft") {
+  if (state.settings.mode === "draft" && !forcePublish) {
     state.drafts.push({ id: crypto.randomUUID(), tid: Number(tid), title: topic.title, content, toPid, created: Date.now() });
     saveState();
     return "נשמרה טיוטה לאישור";
@@ -506,7 +506,7 @@ async function tickMentions() {
         log(`התראת תיוג ${nid} התקבלה, אבל לא הצלחתי לזהות נושא — תיבדק שוב בסבב הבא`);
         continue;
       }
-      if (s.mode === "auto" && repliesLastHour() >= s.maxPerHour) {
+      if (repliesLastHour() >= s.maxPerHour) {
         log("מגבלת התגובות לשעה הושגה; התראת התיוג תטופל בסבב הבא");
         break;
       }
@@ -514,7 +514,7 @@ async function tickMentions() {
       state.processedMentions[nid] = Date.now();
       saveState();
       try {
-        const result = await answerTopic(tid, { force: true, replyToPid: pid || null });
+        const result = await answerTopic(tid, { force: true, replyToPid: pid || null, forcePublish: true });
         if (result.startsWith("לא נמצא הפוסט שתויג")) {
           delete state.processedMentions[nid];
           saveState();
