@@ -391,6 +391,38 @@ function inSchedule() {
 let cookies = {};
 let csrf = "";
 let botUid = null;
+let forumAccessBlock = { blocked: false, reason: "", since: 0 };
+
+function markForumAccessBlocked(bodyText) {
+  let parsed = null;
+  try { parsed = JSON.parse(bodyText); } catch (_) {}
+  const reason = String(parsed && (parsed.reason || parsed.message) || "");
+  const isAccountBlock = !!(parsed && parsed.uid && (
+    parsed.banned_until !== undefined ||
+    parsed.expiry !== undefined ||
+    /ספאם\s*AI|AI\s*spam|spam\s*AI|account.*blocked|user.*banned/i.test(reason)
+  ));
+  if (!isAccountBlock) return false;
+  const wasBlocked = forumAccessBlock.blocked;
+  const previousReason = forumAccessBlock.reason;
+  forumAccessBlock = {
+    blocked: true,
+    reason: reason || "הפורום דחה את התחברות החשבון",
+    since: forumAccessBlock.since || Date.now(),
+  };
+  if (typeof mentionPollStatus !== "undefined") {
+    mentionPollStatus.lastCheckAt = Date.now();
+    mentionPollStatus.lastError = "הפורום חוסם את חשבון הבוט: " + forumAccessBlock.reason;
+  }
+  if (!wasBlocked || previousReason !== forumAccessBlock.reason) {
+    log("הבוט הושהה: הפורום חסם את החשבון (" + forumAccessBlock.reason + "). יש לפתור זאת מול הנהלת הפורום לפני חידוש הפעילות.");
+  }
+  return true;
+}
+
+function clearForumAccessBlock() {
+  forumAccessBlock = { blocked: false, reason: "", since: 0 };
+}
 
 const cookieHeader = () => Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join("; ");
 
@@ -413,6 +445,10 @@ async function req(p, opts = {}) {
   };
   if (csrf && opts.method && opts.method !== "GET") headers["x-csrf-token"] = csrf;
   const res = await fetch(cfg().forum + p, { redirect: "follow", ...opts, headers });
+  if (res.status === 403) {
+    const body = await res.clone().text().catch(() => "");
+    markForumAccessBlocked(body);
+  }
   saveCookies(res);
   return res;
 }
@@ -861,7 +897,8 @@ async function readMentionItems() {
 async function tickMentions() {
   const s = state.settings;
   const c = cfg();
-  if ((REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) ||
+  if (forumAccessBlock.blocked ||
+      (REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) ||
       (REMOTE_STORE_CONFIGURED && !remoteStoreReady) ||
       busy || !s.enabled || s.respondToMentions === false ||
       !(c.session || (c.user && c.pass)) || !c.gemini) return;
@@ -934,7 +971,8 @@ async function tickMentions() {
 async function tick() {
   const s = state.settings;
   const c = cfg();
-  if ((REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) ||
+  if (forumAccessBlock.blocked ||
+      (REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) ||
       (REMOTE_STORE_CONFIGURED && !remoteStoreReady) ||
       busy || !s.enabled || !(c.session || (c.user && c.pass)) || !c.gemini || !inSchedule()) return;
   if (s.mode !== "draft" && replyTimingWaitMs() > 0) return;
@@ -1064,6 +1102,7 @@ function statusObj() {
       answeredCount: Object.keys(state.answered).length,
       activeTopics: activeTopics.slice().sort((a, b) => a.startedAt - b.startedAt),
       mentionMonitor: { ...mentionPollStatus },
+      forumAccess: { ...forumAccessBlock },
       serverTime: new Date().toISOString(),
       log: logBuf.slice(-40),
     },
@@ -1156,6 +1195,8 @@ const server = http.createServer(async (rq, rs) => {
       }
 
       if (route === "POST /control/test-login") {
+        clearForumAccessBlock();
+        mentionPollStatus.lastError = "";
         const uid = await login();
         return json(200, { result: `ההתחברות הצליחה (uid ${uid})` });
       }

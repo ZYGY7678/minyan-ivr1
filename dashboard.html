@@ -508,6 +508,7 @@
       pill(st.configured.user && st.configured.pass, "חשבון בוט") +
       pill(st.configured.gemini, "מפתח Gemini") +
       pill(s.respondToMentions !== false, "תגובה לתיוגים") +
+      pill(!(st.forumAccess && st.forumAccess.blocked), st.forumAccess && st.forumAccess.blocked ? "חשבון הפורום חסום" : "גישה לפורום") +
       pill(!!(st.mentionMonitor && st.mentionMonitor.lastSuccessAt), st.mentionMonitor && st.mentionMonitor.source === "recent-posts" ? "תיוגים: סריקה חלופית" : "קריאת התראות") +
       pill(st.loggedIn, "מחובר לפורום") +
       pill(st.inSchedule, "בתוך שעות הפעילות") +
@@ -527,7 +528,7 @@
         (mm.lastError ? " · שגיאה: " + mm.lastError : "");
     }
     renderActiveTopics(st.activeTopics || []);
-    renderMentionStatus(mm);
+    renderMentionStatus(mm, st.forumAccess || {});
     renderTopicActivity();
     updateReplyCycleHint(st);
     renderDrafts();
@@ -555,7 +556,7 @@
     });
   }
 
-  function renderMentionStatus(mm){
+  function renderMentionStatus(mm, access){
     var box = $("#mentionStatus");
     var sourceLabel = mm.source === "recent-posts" ? "סריקה חלופית של פוסטים" :
       (mm.source === "notifications" ? "API ההתראות של NodeBB" : "ממתין לבדיקה");
@@ -563,8 +564,9 @@
     var success = mm.lastSuccessAt ? new Date(mm.lastSuccessAt).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "אין עדיין";
     box.textContent = "מקור: " + sourceLabel + " · בדיקה אחרונה: " + checked +
       " · בדיקה מוצלחת אחרונה: " + success + " · תיוגים שממתינים לטיפול: " + (mm.unreadCount || 0) +
-      (mm.lastError ? " · פרטי שגיאה/גיבוי: " + mm.lastError : "");
-    box.className = mm.lastError ? "note activity-error" : "note";
+      (mm.lastError ? " · פרטי שגיאה/גיבוי: " + mm.lastError : "") +
+      (access.blocked ? " · חשבון הבוט חסום בפורום: " + (access.reason || "הפורום דחה את החשבון") + ". הבוט הושהה כדי לא להמשיך בניסיונות התחברות; יש לפתור את החסימה מול הנהלת הפורום ואז ללחוץ על ״בדוק התחברות לפורום״." : "");
+    box.className = (mm.lastError || access.blocked) ? "note activity-error" : "note";
   }
 
   function renderTopicActivity(){
