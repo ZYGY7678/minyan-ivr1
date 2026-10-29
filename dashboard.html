@@ -72,6 +72,10 @@
   .log{background:#0b1020;color:#9df5bb;border:1px solid #27324c;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;
     direction:ltr;text-align:left;white-space:pre-wrap;max-height:300px;overflow:auto;padding:15px;border-radius:15px}
   .draft{border:1px solid var(--line);background:var(--field);border-radius:15px;padding:14px;margin:10px 0}
+  .live-topic{border:1px solid var(--line);background:var(--field);border-radius:15px;padding:13px 15px;margin:9px 0;overflow-wrap:anywhere}
+  .live-topic a{color:var(--accent);font-weight:850;text-decoration:none}
+  .live-topic a:hover{text-decoration:underline}
+  .activity-error{color:var(--bad);font-weight:750}
   #topicActivity a{color:var(--accent);font-weight:800;text-decoration:none}#topicActivity a:hover{text-decoration:underline}
   .note{color:var(--muted);font-size:12px;line-height:1.7}
   code{background:var(--soft);border-radius:6px;padding:2px 5px}
@@ -134,6 +138,16 @@
     </div>
     <div id="pills" style="margin-top:10px"></div>
     <button id="saveTop">שמור את כל ההגדרות</button>
+  </div>
+
+  <div class="card">
+    <h2>🟣 נושאים שהבוט מטפל בהם כרגע</h2>
+    <div id="activeTopics" class="note">ממתין לנתוני פעילות...</div>
+  </div>
+
+  <div class="card">
+    <h2>🔔 מצב התראות ותיוגים</h2>
+    <div id="mentionStatus" class="note">ממתין לבדיקה הראשונה של ההתראות</div>
   </div>
 
   <div class="card">
@@ -229,7 +243,7 @@
   </div>
 
   <div class="card">
-    <h2>📌 נושאים שהבוט מטפל בהם והגיב להם לאחרונה</h2>
+    <h2>📚 היסטוריית טיפול בנושאים</h2>
     <div class="note" id="topicActivityHint">הנושאים והקישורים מתעדכנים אוטומטית.</div>
     <div id="topicActivity" class="note">עדיין אין פעילות מתועדת.</div>
   </div>
@@ -510,11 +524,47 @@
       var sourceLabel = mm.source === "recent-posts" ? "סריקת פוסטים חלופית" : (mm.source === "notifications" ? "התראות NodeBB" : "ממתין לבדיקה");
       hint.textContent = "מקור: " + sourceLabel +
         (mm.lastCheckAt ? " · בדיקה אחרונה: " + new Date(mm.lastCheckAt).toLocaleTimeString("he-IL") : "") +
-        (mm.lastError ? " · ההתראות הרגילות נכשלו, הסריקה החלופית פעילה" : "");
+        (mm.lastError ? " · שגיאה: " + mm.lastError : "");
     }
+    renderActiveTopics(st.activeTopics || []);
+    renderMentionStatus(mm);
     renderTopicActivity();
     updateReplyCycleHint(st);
     renderDrafts();
+  }
+
+  function renderActiveTopics(items){
+    var box = $("#activeTopics");
+    box.textContent = "";
+    if (!items.length) {
+      box.className = "note";
+      box.textContent = "כרגע אין נושא בעיבוד. בזמן קריאה, יצירת תשובה או פרסום יוצג כאן נושא עם קישור ישיר.";
+      return;
+    }
+    box.className = "";
+    items.forEach(function(item){
+      var row = document.createElement("div"); row.className = "live-topic";
+      var link = document.createElement("a");
+      link.href = item.url || ((data.secrets.forumUrl || "https://mitmachim.top").replace(/\/$/, "") + "/topic/" + item.tid);
+      link.target = "_blank"; link.rel = "noopener noreferrer";
+      link.textContent = item.title || ("נושא " + item.tid);
+      var meta = document.createElement("div"); meta.className = "note";
+      var since = item.startedAt ? new Date(item.startedAt).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "";
+      meta.textContent = [item.phase || "בטיפול", item.source || "", since ? ("התחיל " + since) : ""].filter(Boolean).join(" · ");
+      row.append(link, meta); box.appendChild(row);
+    });
+  }
+
+  function renderMentionStatus(mm){
+    var box = $("#mentionStatus");
+    var sourceLabel = mm.source === "recent-posts" ? "סריקה חלופית של פוסטים" :
+      (mm.source === "notifications" ? "API ההתראות של NodeBB" : "ממתין לבדיקה");
+    var checked = mm.lastCheckAt ? new Date(mm.lastCheckAt).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "טרם נבדקו";
+    var success = mm.lastSuccessAt ? new Date(mm.lastSuccessAt).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "אין עדיין";
+    box.textContent = "מקור: " + sourceLabel + " · בדיקה אחרונה: " + checked +
+      " · בדיקה מוצלחת אחרונה: " + success + " · תיוגים שממתינים לטיפול: " + (mm.unreadCount || 0) +
+      (mm.lastError ? " · פרטי שגיאה/גיבוי: " + mm.lastError : "");
+    box.className = mm.lastError ? "note activity-error" : "note";
   }
 
   function renderTopicActivity(){
