@@ -43,11 +43,14 @@
 
 <div id="login" style="display:none">
   <div class="card">
-    <h2>🤖 שליטה בבוט הפורום</h2>
-    <label for="pw">סיסמת ניהול (ADMIN_TOKEN)</label>
-    <input type="password" id="pw" autocomplete="current-password">
+    <h2>🤖 כניסה למתמחים טופ</h2>
+    <label for="forumUsername">שם משתמש או כתובת אימייל</label>
+    <input type="text" id="forumUsername" autocomplete="username" autocapitalize="none" spellcheck="false">
+    <label for="forumPassword">סיסמה של מתמחים טופ</label>
+    <input type="password" id="forumPassword" autocomplete="current-password">
     <label class="chk"><input type="checkbox" id="remember"> זכור אותי במכשיר הזה</label>
-    <button id="loginBtn">כניסה</button>
+    <div class="note">הכניסה נבדקת מול מתמחים טופ. לאחר אימות תקין ייפתח ממשק השליטה בבוט.</div>
+    <button id="loginBtn">התחברות</button>
   </div>
 </div>
 
@@ -166,7 +169,7 @@
 (function(){
   var $ = function(s){return document.querySelector(s)};
   var DAYS = ["א","ב","ג","ד","ה","ו","ש"];
-  var token = sessionStorage.getItem("t") || localStorage.getItem("t") || "";
+  var token = sessionStorage.getItem("forumSession") || localStorage.getItem("forumSession") || "";
   var data = null, windows = [], timer = null;
 
   function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
@@ -180,7 +183,7 @@
     return fetch(path, {method: method, headers: {"Content-Type":"application/json","x-admin-token": token}, body: body ? JSON.stringify(body) : undefined})
       .then(function(r){
         return r.json().catch(function(){return {}}).then(function(j){
-          if (r.status === 401) { logout(); throw new Error("סיסמה שגויה"); }
+          if (r.status === 401) { logout(); throw new Error(j.error || "הכניסה פגה, התחבר מחדש"); }
           if (!r.ok) throw new Error(j.error || ("שגיאה " + r.status));
           return j;
         });
@@ -188,17 +191,51 @@
   }
 
   function showLogin(){ $("#app").style.display="none"; $("#login").style.display="block"; clearInterval(timer); }
-  function logout(){ token=""; sessionStorage.removeItem("t"); localStorage.removeItem("t"); showLogin(); }
+  function logout(){
+    var old = token;
+    if (old) fetch("/auth/forum-logout", {method:"POST", headers:{"x-admin-token":old}}).catch(function(){});
+    token="";
+    sessionStorage.removeItem("forumSession");
+    localStorage.removeItem("forumSession");
+    // הסרת מפתח הכניסה הישן, אם נשמר בדפדפן.
+    sessionStorage.removeItem("t");
+    localStorage.removeItem("t");
+    showLogin();
+  }
 
   $("#loginBtn").onclick = function(){
-    token = $("#pw").value;
-    api("GET","/control/settings").then(function(j){
-      sessionStorage.setItem("t", token);
-      if ($("#remember").checked) localStorage.setItem("t", token);
-      start(j);
-    }).catch(function(e){ toast(e.message, false); });
+    var btn = this;
+    var username = $("#forumUsername").value.trim();
+    var password = $("#forumPassword").value;
+    if (!username || !password) return toast("הזן שם משתמש וסיסמה של מתמחים טופ", false);
+    btn.disabled = true;
+    btn.textContent = "מתחבר...";
+    fetch("/auth/forum-login", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({username: username, password: password})
+    }).then(function(r){
+      return r.json().catch(function(){return {}}).then(function(j){
+        if (!r.ok) throw new Error(j.error || "ההתחברות נכשלה");
+        return j;
+      });
+    }).then(function(j){
+      if (!j.token) throw new Error("ההתחברות לא החזירה אסימון תקף");
+      token = j.token;
+      sessionStorage.setItem("forumSession", token);
+      if ($("#remember").checked) localStorage.setItem("forumSession", token);
+      else localStorage.removeItem("forumSession");
+      $("#forumPassword").value = "";
+      return api("GET","/control/settings").then(start);
+    }).catch(function(e){
+      toast(e.message, false);
+    }).then(function(){
+      btn.disabled = false;
+      btn.textContent = "התחברות";
+    });
   };
-  $("#pw").addEventListener("keydown", function(e){ if (e.key==="Enter") $("#loginBtn").click(); });
+  $("#forumPassword").addEventListener("keydown", function(e){ if (e.key==="Enter") $("#loginBtn").click(); });
+  $("#forumUsername").addEventListener("keydown", function(e){ if (e.key==="Enter") $("#loginBtn").click(); });
   $("#logoutBtn").onclick = logout;
 
   function start(j){
