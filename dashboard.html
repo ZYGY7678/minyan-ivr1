@@ -483,6 +483,7 @@
   function renderStatus(){
     var st = data.status, s = data.settings;
     $("#pills").innerHTML =
+      pill(st.storage && st.storage.durable, st.storage && st.storage.durable ? "שמירה קבועה פעילה" : "שמירה קבועה לא מחוברת") +
       pill(st.configured.user && st.configured.pass, "חשבון בוט") +
       pill(st.configured.gemini, "מפתח Gemini") +
       pill(s.respondToMentions !== false, "תגובה לתיוגים") +
