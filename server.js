@@ -455,16 +455,131 @@ async function loop() {
   setTimeout(loop, state.settings.pollSeconds * 1000);
 }
 
+// ---------- התחברות רגילה עם חשבון מתמחים טופ ----------
+// לאחר אימות מול NodeBB מונפק טוקן זמני לממשק הניהול.
+const dashboardSessions = new Map();
+const forumLoginAttempts = new Map();
+
+async function verifyForumCredentials(username, password) {
+  const base = cfg().forum.replace(/\/$/, "");
+  const jar = {};
+  let csrfToken = "";
+
+  function rememberCookies(res) {
+    let list = [];
+    if (typeof res.headers.getSetCookie === "function") list = res.headers.getSetCookie();
+    if (!list.length) {
+      const one = res.headers.get("set-cookie");
+      if (one) list = [one];
+    }
+    for (const item of list) {
+      const pair = item.split(";")[0];
+      const i = pair.indexOf("=");
+      if (i > 0) jar[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
+    }
+  }
+
+  async function request(pathOrUrl, options = {}) {
+    let url = new URL(pathOrUrl, base + "/").toString();
+    let method = options.method || "GET";
+    let body = options.body;
+    for (let redirects = 0; redirects < 6; redirects++) {
+      const headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36",
+        Origin: base,
+        Referer: base + "/login",
+        ...(options.headers || {}),
+      };
+      const cookie = Object.entries(jar).map(([k, v]) => k + "=" + v).join("; ");
+      if (cookie) headers.Cookie = cookie;
+      if (csrfToken && method !== "GET" && method !== "HEAD") headers["x-csrf-token"] = csrfToken;
+
+      const res = await fetch(url, { method, body, headers, redirect: "manual" });
+      rememberCookies(res);
+      const location = res.headers.get("location");
+      if ([301, 302, 303, 307, 308].includes(res.status) && location) {
+        url = new URL(location, url).toString();
+        if ([301, 302, 303].includes(res.status) && method !== "GET" && method !== "HEAD") {
+          method = "GET";
+          body = undefined;
+        }
+        continue;
+      }
+      return res;
+    }
+    throw new Error("הפורום החזיר יותר מדי הפניות בזמן ההתחברות");
+  }
+
+  async function getConfig() {
+    const res = await request("/api/config");
+    const text = await res.text();
+    if (!res.ok) throw forumLoginError(res.status, text);
+    let data;
+    try { data = JSON.parse(text); } catch (_) { throw forumLoginError(res.status, text); }
+    csrfToken = data.csrf_token || csrfToken;
+    return data;
+  }
+
+  const loginPage = await request("/login");
+  const loginPageText = await loginPage.text().catch(() => "");
+  if (!loginPage.ok) throw forumLoginError(loginPage.status, loginPageText);
+
+  await getConfig();
+  const form = new URLSearchParams({ username, password, remember: "on" });
+  const response = await request("/login", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "x-requested-with": "XMLHttpRequest",
+      Referer: base + "/login",
+    },
+    body: form,
+  });
+  const responseText = await response.text().catch(() => "");
+  if (response.status >= 400) throw forumLoginError(response.status, responseText);
+
+  const config = await getConfig();
+  let uid = config.loggedInUser?.uid || config.uid;
+  if (!uid) {
+    const me = await request("/api/me");
+    const meText = await me.text().catch(() => "");
+    if (me.ok) {
+      try { uid = JSON.parse(meText).uid; } catch (_) {}
+    }
+  }
+  if (!Number(uid)) {
+    throw new Error("מתמחים טופ לא אישר את הכניסה. בדוק שם משתמש וסיסמה ונסה שוב");
+  }
+  return { uid: Number(uid), cookies: jar, csrf: csrfToken };
+}
+
+function forumLoginError(status, body) {
+  const text = String(body || "");
+  if (/cloudflare|cf-chl|just a moment|attention required|captcha/i.test(text)) {
+    return new Error("מתמחים טופ חסם את ההתחברות הישירה מהשרת (Cloudflare/בדיקת אבטחה). צריך שהפורום יאפשר חיבור מהשרת כדי שהכניסה הרגילה תפעל.");
+  }
+  if (/invalid-username-or-password|invalid-login-credentials|invalid login|invalid password|שם משתמש או סיסמה/i.test(text)) {
+    return new Error("שם המשתמש או הסיסמה של מתמחים טופ אינם נכונים");
+  }
+  if (status === 429) return new Error("מתמחים טופ הגביל זמנית ניסיונות התחברות. נסה שוב מאוחר יותר");
+  return new Error("ההתחברות למתמחים טופ נכשלה (HTTP " + status + "). בדוק את הפרטים ונסה שוב");
+}
+
 // ---------- אימות לאתר השליטה ----------
 const fails = new Map();
 const clientIp = (rq) => (rq.headers["x-forwarded-for"] || "").split(",")[0].trim() || rq.socket.remoteAddress || "?";
 
 function checkAuth(rq) {
+  const supplied = String(rq.headers["x-admin-token"] || "");
+  const session = dashboardSessions.get(supplied);
+  if (session && session.expiresAt > Date.now()) return "ok";
+  if (session) dashboardSessions.delete(supplied);
+
   const ip = clientIp(rq);
   const f = fails.get(ip);
   if (f && f.until > Date.now()) return "locked";
   const h = (v) => crypto.createHash("sha256").update(String(v)).digest();
-  if (crypto.timingSafeEqual(h(rq.headers["x-admin-token"] || ""), h(ADMIN_TOKEN))) {
+  if (crypto.timingSafeEqual(h(supplied), h(ADMIN_TOKEN))) {
     fails.delete(ip);
     return "ok";
   }
@@ -516,6 +631,55 @@ const server = http.createServer(async (rq, rs) => {
   };
 
   if (url.pathname === "/health") return rs.end("ok");
+
+  if (url.pathname === "/auth/forum-login" && rq.method === "POST") {
+    const ip = clientIp(rq);
+    const now = Date.now();
+    let attempt = forumLoginAttempts.get(ip);
+    if (attempt && attempt.until > now) {
+      return json(429, { error: "נחסמת זמנית לאחר ניסיונות התחברות מרובים. נסה בעוד 15 דקות." });
+    }
+    if (!attempt || now - attempt.firstAt > 15 * 60_000) {
+      attempt = { count: 0, firstAt: now, until: 0 };
+    }
+
+    try {
+      const b = await readBody(rq);
+      const username = typeof b.username === "string" ? b.username.trim() : "";
+      const password = typeof b.password === "string" ? b.password : "";
+      if (!username || !password) return json(400, { error: "הזן שם משתמש וסיסמה של מתמחים טופ" });
+      if (username.length > 160 || password.length > 1024) {
+        return json(400, { error: "פרטי ההתחברות ארוכים מדי" });
+      }
+
+      const verified = await verifyForumCredentials(username, password);
+      state.secrets.botUser = username;
+      state.secrets.botPass = password;
+      delete state.secrets.sessionCookie;
+      saveState();
+      cookies = verified.cookies;
+      csrf = verified.csrf;
+      botUid = verified.uid;
+      forumLoginAttempts.delete(ip);
+
+      const token = crypto.randomBytes(32).toString("hex");
+      const expiresAt = now + 12 * 60 * 60_000;
+      dashboardSessions.set(token, { user: username, expiresAt });
+      return json(200, { token, username, expiresAt });
+    } catch (e) {
+      attempt.count += 1;
+      if (attempt.count >= 5) attempt.until = now + 15 * 60_000;
+      forumLoginAttempts.set(ip, attempt);
+      const status = /Cloudflare|בדיקת אבטחה/.test(e.message) ? 503 : (/נכונים/.test(e.message) ? 401 : 502);
+      log("התחברות לחשבון מתמחים טופ נכשלה");
+      return json(status, { error: e.message || "ההתחברות נכשלה" });
+    }
+  }
+
+  if (url.pathname === "/auth/forum-logout" && rq.method === "POST") {
+    dashboardSessions.delete(String(rq.headers["x-admin-token"] || ""));
+    return json(200, { result: "התנתקת" });
+  }
 
   if (url.pathname === "/" || url.pathname === "/index.html") {
     try {
