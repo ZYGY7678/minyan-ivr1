@@ -176,7 +176,7 @@
   <div class="card">
     <h2>⏱️ תזמון אוטומטי של תגובות</h2>
     <label class="chk"><input type="checkbox" id="replyCycleEnabled"> הפעל קצב תגובות מחזורי</label>
-    <div class="note">לדוגמה: תגובה אחת כל 3 דקות; אחרי 10 תגובות הבוט עוצר ל־30 דקות ואז ממשיך במחזור חדש. הספירה מתבצעת רק אחרי שתגובה פורסמה בהצלחה, וההפסקה חלה גם על תשובות בעקבות תיוג.</div>
+    <div class="note">לדוגמה: תגובה אחת כל 3 דקות; אחרי 10 תגובות הבוט עוצר ל־30 דקות ואז ממשיך במחזור חדש. הספירה מתבצעת רק אחרי שתגובה פורסמה בהצלחה, וההפסקה חלה גם על תשובות בעקבות תיוג. בשמירה, אם צריך, מגבלת התגובות לשעה תוגדל למספר התגובות שבמחזור (עד 60) כדי שהמחזור יוכל להסתיים.</div>
     <div class="interval-presets" role="group" aria-label="בחירת מרווח בין תגובות">
       <button type="button" class="gray" data-reply-min="1">כל דקה</button>
       <button type="button" class="gray" data-reply-min="2">כל 2 דקות</button>
@@ -416,6 +416,11 @@
     if (values.replyCycleEnabled) {
       $("#pollMinutes").value = values.replyIntervalMinutes;
       values.pollSeconds = values.replyIntervalMinutes * 60;
+      var currentHourlyLimit = Math.min(60, Math.max(1, Number($("#maxPerHour").value) || 4));
+      if (currentHourlyLimit < values.repliesPerCycle) {
+        values.maxPerHour = Math.min(60, values.repliesPerCycle);
+        $("#maxPerHour").value = values.maxPerHour;
+      }
     }
     if(btn) btn.disabled = true;
     api("POST","/control/settings", values).then(function(j){
