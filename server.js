@@ -506,11 +506,23 @@ async function tickMentions() {
         log(`התראת תיוג ${nid} התקבלה, אבל לא הצלחתי לזהות נושא — תיבדק שוב בסבב הבא`);
         continue;
       }
+      if (s.mode === "auto" && repliesLastHour() >= s.maxPerHour) {
+        log("מגבלת התגובות לשעה הושגה; התראת התיוג תטופל בסבב הבא");
+        break;
+      }
 
       state.processedMentions[nid] = Date.now();
       saveState();
       try {
         const result = await answerTopic(tid, { force: true, replyToPid: pid || null });
+        if (result.startsWith("לא נמצא הפוסט שתויג")) {
+          delete state.processedMentions[nid];
+          saveState();
+          log(`התראת תיוג ${nid} ממתינה לניסיון חוזר: ${result}`);
+          continue;
+        }
+        state.answered[tid] = Date.now();
+        saveState();
         log(`התראת תיוג ${nid}, נושא ${tid}: ${result}`);
       } catch (e) {
         delete state.processedMentions[nid];
