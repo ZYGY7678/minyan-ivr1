@@ -20,6 +20,7 @@ if (ADMIN_TOKEN.length < 8) {
 // ---------- הגדרות ברירת מחדל ----------
 const DEFAULT_SETTINGS = {
   enabled: false,
+  respondToMentions: true,
   mode: "auto", // auto = מפרסם לבד | draft = שומר טיוטה לאישור שלך
   filters: ["unanswered"], // all | unanswered | unread | unsolved (כולם חייבים להתקיים יחד)
   categories: [],
@@ -37,7 +38,7 @@ const DEFAULT_SETTINGS = {
   },
 };
 
-let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [] };
+let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {} };
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const clamp = (n, lo, hi, d) => {
@@ -49,6 +50,7 @@ function sanitizeSettings(s) {
   const d = DEFAULT_SETTINGS;
   const out = {};
   out.enabled = !!s.enabled;
+  out.respondToMentions = s.respondToMentions !== false;
   out.mode = s.mode === "draft" ? "draft" : "auto";
   const allowed = ["all", "unanswered", "unread", "unsolved"];
   out.filters = Array.isArray(s.filters) ? s.filters.filter((f) => allowed.includes(f)) : d.filters;
@@ -92,6 +94,7 @@ function loadState() {
     state.secrets = raw.secrets && typeof raw.secrets === "object" ? raw.secrets : {};
     state.answered = raw.answered || {};
     state.drafts = Array.isArray(raw.drafts) ? raw.drafts : [];
+    state.processedMentions = raw.processedMentions && typeof raw.processedMentions === "object" ? raw.processedMentions : {};
   } catch (_) {
     /* אין קובץ עדיין */
   }
@@ -103,6 +106,10 @@ function saveState() {
     const entries = Object.entries(state.answered).sort((a, b) => b[1] - a[1]).slice(0, 500);
     state.answered = Object.fromEntries(entries);
     state.drafts = state.drafts.slice(-50);
+    const processed = Object.entries(state.processedMentions || {})
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 1000);
+    state.processedMentions = Object.fromEntries(processed);
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
   } catch (e) {
     console.error("שמירת מצב נכשלה:", e.message);
@@ -371,27 +378,70 @@ async function postReply(tid, content, toPid) {
   repliesLog.push(Date.now());
 }
 
-async function answerTopic(tid, { force = false } = {}) {
+async function topicPageForPost(tid, pid) {
+  // NodeBB redirects /api/post/{pid} to the canonical topic URL, including the post index.
+  try {
+    const response = await req(`/api/post/${encodeURIComponent(pid)}`, { redirect: "manual" });
+    let target = response.headers.get("location") || "";
+    if (!target) {
+      const body = await response.text().catch(() => "");
+      if (/^https?:\/\//i.test(body.trim()) || /^\/topic\//.test(body.trim())) target = body.trim();
+    }
+    if (!target) return null;
+    const url = new URL(target, cfg().forum);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const at = parts.indexOf("topic");
+    if (at < 0) return null;
+    const a = parts[at + 1] || "";
+    const b = parts[at + 2] || "";
+    const c = parts[at + 3] || "0";
+
+    let actualTid = 0, slug = "", postIndex = "0";
+    if (/^\d+$/.test(a)) {
+      actualTid = Number(a); slug = b; postIndex = c;
+    } else if (/^\d+$/.test(b)) {
+      slug = a; actualTid = Number(b); postIndex = c;
+    }
+    if (!actualTid) actualTid = Number(tid) || 0;
+    if (!actualTid) return null;
+    return await getJson(`/api/topic/${actualTid}/${encodeURIComponent(slug || "")}/${encodeURIComponent(postIndex)}`);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function answerTopic(tid, { force = false, replyToPid = null } = {}) {
   if (!botUid) await login();
-  const topic = await getJson(`/api/topic/${tid}`);
+  let topic = await getJson(`/api/topic/${tid}`);
+  if (replyToPid) {
+    const page = await topicPageForPost(tid, replyToPid);
+    if (page && Array.isArray(page.posts) && page.posts.length) topic = page;
+  }
   if (topic.locked || topic.deleted) return "הנושא נעול או נמחק";
-  const posts = topic.posts || [];
+  const posts = Array.isArray(topic.posts) ? topic.posts : [];
   if (!posts.length) return "אין פוסטים בנושא";
-  const last = posts[posts.length - 1];
+  let last = posts[posts.length - 1];
+  if (replyToPid) {
+    const mentionedPost = posts.find((p) => String(p.pid) === String(replyToPid));
+    if (mentionedPost) last = mentionedPost;
+    else return "לא נמצא הפוסט שתויג בהתראה, דילוג כדי לא להשיב להודעה הלא נכונה";
+  }
   if (!force && String(last.uid) === String(botUid)) return "הבוט כבר ענה אחרון";
 
-  const first = posts[0];
-  const recent = posts.length > 1 ? posts.slice(-6) : [];
-  const ctx = [first, ...recent.filter((p) => p.pid !== first.pid)]
+  const lastIndex = posts.findIndex((p) => String(p.pid) === String(last.pid));
+  const beforeTarget = lastIndex >= 0 ? posts.slice(0, lastIndex + 1) : posts;
+  const recent = beforeTarget.length > 6 ? [beforeTarget[0], ...beforeTarget.slice(-5)] : beforeTarget;
+  const ctx = recent
     .map((p) => `@${p.user?.username || "?"}:\n${stripHtml(p.content).slice(0, 2500)}`)
     .join("\n\n---\n\n");
-  const prompt = `כותרת: ${topic.title}\nתגיות: ${(topic.tags || []).map((t) => t.value).join(", ")}\n\nשרשור:\n${ctx}\n\nכתוב תגובה שעונה למשתמש @${last.user?.username || ""}.`;
+  const targetUsername = last.user?.username || last.username || "";
+  const prompt = `כותרת: ${topic.title}\nתגיות: ${(topic.tags || []).map((t) => t.value).join(", ")}\n\nשרשור עד ההודעה שאליה צריך להשיב:\n${ctx}\n\nענה ישירות להודעה האחרונה בשרשור שמוצג, מאת @${targetUsername}. אם יש צורך, התייחס במפורש לשאלה או לבקשה בהודעה זו.`;
 
   const answer = await askGemini(prompt);
   if (!answer || answer.trim() === "SKIP") return "דילוג (המודל החליט לא לענות)";
 
   const content = answer + state.settings.signature;
-  const toPid = posts.length > 1 && last.pid ? last.pid : null;
+  const toPid = last.pid ? Number(last.pid) : null;
 
   if (state.settings.mode === "draft") {
     state.drafts.push({ id: crypto.randomUUID(), tid: Number(tid), title: topic.title, content, toPid, created: Date.now() });
@@ -403,6 +453,82 @@ async function answerTopic(tid, { force = false } = {}) {
 }
 
 let busy = false;
+
+function notificationTopicId(notification) {
+  const known = Number(notification && notification.tid);
+  if (Number.isInteger(known) && known > 0) return known;
+  const p = String((notification && notification.path) || "");
+  // Standard NodeBB topic path commonly includes /topic/{tid}/...
+  let m = p.match(/\/topic\/(\d+)(?:\/|$)/i);
+  if (m) return Number(m[1]);
+  // Also tolerate /topic/{slug}/{tid}/...
+  m = p.match(/\/topic\/[^/]+\/(\d+)(?:\/|$)/i);
+  if (m) return Number(m[1]);
+  return 0;
+}
+
+async function tickMentions() {
+  const s = state.settings;
+  const c = cfg();
+  if (busy || !s.enabled || s.respondToMentions === false ||
+      !(c.session || (c.user && c.pass)) || !c.gemini) return;
+
+  busy = true;
+  try {
+    if (!botUid) await login();
+    const data = await getJson("/api/notifications?start=0&count=50");
+    const notifications = Array.isArray(data.notifications) ? data.notifications : [];
+    const unreadIds = Array.isArray(data.unreadNids) ? new Set(data.unreadNids.map(String)) : null;
+    const mentions = notifications.filter((n) => {
+      if (!n || !n.nid) return false;
+      const type = String(n.type || "").toLowerCase();
+      const isMention = type === "mention" || type === "mentions" || type.includes("mention");
+      if (!isMention) return false;
+      if (state.processedMentions[String(n.nid)]) return false;
+      return unreadIds ? unreadIds.has(String(n.nid)) : n.read === false;
+    }).sort((a, b) => Number(a.datetime || 0) - Number(b.datetime || 0));
+
+    for (const notification of mentions) {
+      const nid = String(notification.nid);
+      if (state.processedMentions[nid]) continue;
+      let tid = notificationTopicId(notification);
+      const pid = Number(notification.pid) || 0;
+
+      if (!tid && pid) {
+        try {
+          const response = await req(`/api/post/${encodeURIComponent(pid)}`, { redirect: "manual" });
+          const location = response.headers.get("location") || "";
+          const found = notificationTopicId({ path: location });
+          if (found) tid = found;
+        } catch (_) {}
+      }
+      if (!tid) {
+        log(`התראת תיוג ${nid} התקבלה, אבל לא הצלחתי לזהות נושא — תיבדק שוב בסבב הבא`);
+        continue;
+      }
+
+      state.processedMentions[nid] = Date.now();
+      saveState();
+      try {
+        const result = await answerTopic(tid, { force: true, replyToPid: pid || null });
+        log(`התראת תיוג ${nid}, נושא ${tid}: ${result}`);
+      } catch (e) {
+        delete state.processedMentions[nid];
+        saveState();
+        log(`שגיאה בתגובה להתראת תיוג ${nid}: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    // Avoid flooding the log for a temporary notifications endpoint issue.
+    if (!tickMentions.lastError || Date.now() - tickMentions.lastError > 60_000) {
+      log(`בדיקת התראות תיוג נכשלה: ${e.message}`);
+      tickMentions.lastError = Date.now();
+    }
+    botUid = null;
+  } finally {
+    busy = false;
+  }
+}
 
 async function tick() {
   const s = state.settings;
@@ -453,6 +579,11 @@ async function tick() {
 async function loop() {
   try { await tick(); } catch (_) {}
   setTimeout(loop, state.settings.pollSeconds * 1000);
+}
+
+async function mentionLoop() {
+  try { await tickMentions(); } catch (_) {}
+  setTimeout(mentionLoop, 10_000);
 }
 
 // ---------- אימות לאתר השליטה ----------
@@ -620,3 +751,4 @@ loadState();
 saveState();
 server.listen(process.env.PORT || 3000, () => log("השרת עלה"));
 setTimeout(loop, 5000);
+setTimeout(mentionLoop, 7000);
