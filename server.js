@@ -121,6 +121,20 @@ function applyStateSnapshot(raw) {
   state.drafts = Array.isArray(raw.drafts) ? raw.drafts : [];
   state.processedMentions = raw.processedMentions && typeof raw.processedMentions === "object" ? raw.processedMentions : {};
   state.topicActivity = Array.isArray(raw.topicActivity) ? raw.topicActivity.filter((x) => x && Number(x.tid) > 0).slice(0, 30) : [];
+  // Backfill visible links from the existing answered-topic history on the first upgraded startup.
+  if (!state.topicActivity.length) {
+    state.topicActivity = Object.entries(state.answered)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 20)
+      .map(([tid, updatedAt]) => ({
+        tid: Number(tid),
+        title: "נושא " + tid,
+        status: "נבדק בעבר",
+        detail: "פעילות היסטורית; הכותרת תופיע בפעילות הבאה",
+        updatedAt: Number(updatedAt) || Date.now(),
+        url: cfg().forum + "/topic/" + tid,
+      }));
+  }
   state.lastReplyAt = Number(raw.lastReplyAt) > 0 ? Number(raw.lastReplyAt) : 0;
   state.repliesInCycle = Number.isFinite(Number(raw.repliesInCycle)) ? Math.max(0, Number(raw.repliesInCycle)) : 0;
   state.pauseUntil = Number(raw.pauseUntil) > 0 ? Number(raw.pauseUntil) : 0;
