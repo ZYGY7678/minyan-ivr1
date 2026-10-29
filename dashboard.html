@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>שליטה בבוט הפורום</title>
+<style>
+  :root{--bg:#f3f5f9;--card:#fff;--text:#1d2330;--muted:#6b7385;--line:#d9dee8;--accent:#2d6cdf;--ok:#1a8a4a;--bad:#c0392b}
+  @media (prefers-color-scheme: dark){:root{--bg:#12151c;--card:#1b2030;--text:#e8ebf2;--muted:#9aa3b6;--line:#2c3348;--accent:#5b8def;--ok:#3ecf7a;--bad:#ff6b5b}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,Arial,sans-serif}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:5}
+  header h1{font-size:18px;margin:0}
+  main{max-width:820px;margin:0 auto;padding:12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0}
+  .card h2{font-size:16px;margin:0 0 10px}
+  label{display:block;margin:8px 0 2px;color:var(--muted);font-size:13px}
+  label.chk{display:flex;gap:8px;align-items:center;color:var(--text);font-size:15px;margin:6px 0}
+  input[type=text],input[type=password],input[type=number],input[type=time],select,textarea{width:100%;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+  textarea{min-height:90px;resize:vertical}
+  input[type=checkbox]{width:18px;height:18px}
+  button{padding:9px 14px;border:none;border-radius:8px;background:var(--accent);color:#fff;font:inherit;cursor:pointer;margin:4px 3px 4px 0}
+  button.gray{background:#6b7385}button.red{background:var(--bad)}button.green{background:var(--ok)}
+  button:disabled{opacity:.5}
+  .row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1;min-width:140px}
+  .pill{display:inline-block;padding:3px 10px;border-radius:99px;font-size:13px;margin:2px;border:1px solid var(--line)}
+  .pill.ok{color:var(--ok);border-color:var(--ok)}.pill.bad{color:var(--bad);border-color:var(--bad)}
+  .win{border:1px dashed var(--line);border-radius:8px;padding:8px;margin:6px 0}
+  .day{display:inline-flex;gap:3px;align-items:center;margin-left:10px}
+  .log{background:#0c0f14;color:#8ff0a4;font:12px/1.5 monospace;direction:ltr;text-align:left;white-space:pre-wrap;max-height:240px;overflow:auto;padding:8px;border-radius:8px}
+  .draft{border:1px solid var(--line);border-radius:8px;padding:8px;margin:8px 0}
+  .note{color:var(--muted);font-size:13px}
+  #toast{position:fixed;bottom:16px;right:16px;left:16px;max-width:420px;margin:auto;padding:10px 14px;border-radius:10px;color:#fff;display:none;z-index:20;text-align:center}
+  #login{max-width:360px;margin:15vh auto;padding:0 12px}
+  .big{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .switch{width:60px;height:32px;border-radius:99px;background:#888;position:relative;cursor:pointer;flex:none;border:none;padding:0;margin:0}
+  .switch::after{content:"";position:absolute;top:3px;right:3px;width:26px;height:26px;border-radius:50%;background:#fff;transition:.2s}
+  .switch.on{background:var(--ok)}.switch.on::after{right:31px}
+</style>
+</head>
+<body>
+
+<div id="login" style="display:none">
+  <div class="card">
+    <h2>🤖 שליטה בבוט הפורום</h2>
+    <label for="pw">סיסמת ניהול (ADMIN_TOKEN)</label>
+    <input type="password" id="pw" autocomplete="current-password">
+    <label class="chk"><input type="checkbox" id="remember"> זכור אותי במכשיר הזה</label>
+    <button id="loginBtn">כניסה</button>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+<header>
+  <h1>🤖 שליטה בבוט הפורום</h1>
+  <button class="gray" id="logoutBtn">יציאה</button>
+</header>
+<main>
+
+  <div class="card">
+    <div class="big">
+      <div><h2 style="margin:0">הבוט פעיל</h2><div class="note">מדליק ומכבה את כל הפעילות האוטומטית</div></div>
+      <button class="switch" id="enabledSwitch" aria-label="הפעלה"></button>
+    </div>
+    <div id="pills" style="margin-top:10px"></div>
+    <button id="saveTop">שמור את כל ההגדרות</button>
+  </div>
+
+  <div class="card">
+    <h2>🔑 חיבורים ומפתחות</h2>
+    <label for="forumUrl">כתובת הפורום</label>
+    <input type="text" id="forumUrl" dir="ltr" placeholder="https://mitmachim.top">
+    <div class="row">
+      <div><label for="botUser">שם משתמש של הבוט</label><input type="text" id="botUser" dir="ltr" autocomplete="off"></div>
+      <div><label for="botPass">סיסמת הבוט</label><input type="password" id="botPass" dir="ltr" autocomplete="new-password"></div>
+    </div>
+    <label for="geminiKey">מפתח Gemini API</label>
+    <input type="password" id="geminiKey" dir="ltr" autocomplete="new-password">
+    <label for="model">מודל Gemini</label>
+    <input type="text" id="model" dir="ltr" placeholder="gemini-2.5-flash">
+    <div class="note">שדה שנשאר ריק לא משנה את הערך השמור. סיסמאות ומפתחות לא מוצגים שוב אחרי השמירה.</div>
+    <button id="saveSecrets">שמור חיבורים</button>
+    <button class="gray" id="testLogin">בדוק התחברות לפורום</button>
+    <button class="gray" id="testGemini">בדוק Gemini</button>
+  </div>
+
+  <div class="card">
+    <h2>⚙️ אופן עבודה</h2>
+    <div class="row">
+      <div><label for="mode">מצב פרסום</label>
+        <select id="mode"><option value="auto">אוטומטי מלא (מפרסם לבד)</option><option value="draft">טיוטה לאישור שלי</option></select></div>
+      <div><label for="pollSeconds">סריקה כל (שניות)</label><input type="number" id="pollSeconds" min="30" max="3600"></div>
+    </div>
+    <div class="row">
+      <div><label for="maxPerHour">מקסימום תגובות בשעה</label><input type="number" id="maxPerHour" min="1" max="60"></div>
+      <div><label for="maxAgeMinutes">לא לענות על נושאים ישנים מ (דקות)</label><input type="number" id="maxAgeMinutes" min="5"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>🎯 אילו נושאים לענות</h2>
+    <div class="note">כל הסימונים שנבחרו חייבים להתקיים יחד.</div>
+    <label class="chk"><input type="checkbox" data-f="all"> הכל (בלי סינון)</label>
+    <label class="chk"><input type="checkbox" data-f="unanswered"> רק נושאים בלי תגובות</label>
+    <label class="chk"><input type="checkbox" data-f="unread"> רק נושאים שלא נקראו</label>
+    <label class="chk"><input type="checkbox" data-f="unsolved"> רק נושאים שלא נפתרו</label>
+    <label for="categories">קטגוריות (מספרי cid מופרדים בפסיק, ריק = כולן)</label>
+    <input type="text" id="categories" dir="ltr" placeholder="5,7,12">
+    <label for="solvedTags">תגיות או מילים שמסמנות "נפתר" (מופרדות בפסיק)</label>
+    <input type="text" id="solvedTags">
+  </div>
+
+  <div class="card">
+    <h2>🕒 שעות פעילות</h2>
+    <label class="chk"><input type="checkbox" id="alwaysOn"> פעיל תמיד (מתעלם מהחלונות)</label>
+    <label class="chk"><input type="checkbox" id="pauseShabbat"> השהיה משוערת בשבת (שישי 13:00 עד מוצ"ש 21:00)</label>
+    <label for="timezone">אזור זמן</label>
+    <input type="text" id="timezone" dir="ltr">
+    <div id="wins"></div>
+    <button class="gray" id="addWin">+ הוסף חלון זמן</button>
+  </div>
+
+  <div class="card">
+    <h2>✍️ סגנון כתיבה</h2>
+    <label for="customPrompt">הנחיות נוספות למודל (טון, נושאי התמחות, מה לא לענות וכו')</label>
+    <textarea id="customPrompt" placeholder="למשל: ענה בקצרה. אם מדובר בבעיה באנדרואיד, שאל איזה דגם ואיזו גרסה."></textarea>
+    <label for="signature">חתימה בסוף כל תגובה</label>
+    <textarea id="signature" style="min-height:60px"></textarea>
+    <button id="saveBottom">שמור את כל ההגדרות</button>
+  </div>
+
+  <div class="card">
+    <h2>📝 טיוטות לאישור <span id="draftCount"></span></h2>
+    <div id="drafts" class="note">אין טיוטות</div>
+  </div>
+
+  <div class="card">
+    <h2>🛠️ פעולות</h2>
+    <label for="topicRef">מספר נושא או קישור לנושא</label>
+    <input type="text" id="topicRef" dir="ltr" placeholder="https://mitmachim.top/topic/12345/...">
+    <button id="answerNow">ענה בנושא הזה עכשיו</button>
+    <hr style="border:none;border-top:1px solid var(--line)">
+    <button class="gray" id="runNow">סרוק עכשיו</button>
+    <button class="red" id="resetAnswered">אפס את רשימת הנושאים שנענו</button>
+    <div class="note">בהשהיה מצב הפרסום נשמר: בטיוטה, התשובה תיכנס לטיוטות.</div>
+  </div>
+
+  <div class="card">
+    <h2>📜 יומן</h2>
+    <div class="log" id="log"></div>
+  </div>
+
+</main>
+</div>
+<div id="toast"></div>
+
+<script>
+(function(){
+  var $ = function(s){return document.querySelector(s)};
+  var DAYS = ["א","ב","ג","ד","ה","ו","ש"];
+  var token = sessionStorage.getItem("t") || localStorage.getItem("t") || "";
+  var data = null, windows = [], timer = null;
+
+  function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
+
+  function toast(msg, ok){
+    var t = $("#toast"); t.textContent = msg; t.style.background = ok ? "#1a8a4a" : "#c0392b"; t.style.display = "block";
+    clearTimeout(toast.h); toast.h = setTimeout(function(){t.style.display="none"}, 4500);
+  }
+
+  function api(method, path, body){
+    return fetch(path, {method: method, headers: {"Content-Type":"application/json","x-admin-token": token}, body: body ? JSON.stringify(body) : undefined})
+      .then(function(r){
+        return r.json().catch(function(){return {}}).then(function(j){
+          if (r.status === 401) { logout(); throw new Error("סיסמה שגויה"); }
+          if (!r.ok) throw new Error(j.error || ("שגיאה " + r.status));
+          return j;
+        });
+      });
+  }
+
+  function showLogin(){ $("#app").style.display="none"; $("#login").style.display="block"; clearInterval(timer); }
+  function logout(){ token=""; sessionStorage.removeItem("t"); localStorage.removeItem("t"); showLogin(); }
+
+  $("#loginBtn").onclick = function(){
+    token = $("#pw").value;
+    api("GET","/control/settings").then(function(j){
+      sessionStorage.setItem("t", token);
+      if ($("#remember").checked) localStorage.setItem("t", token);
+      start(j);
+    }).catch(function(e){ toast(e.message, false); });
+  };
+  $("#pw").addEventListener("keydown", function(e){ if (e.key==="Enter") $("#loginBtn").click(); });
+  $("#logoutBtn").onclick = logout;
+
+  function start(j){
+    $("#login").style.display="none"; $("#app").style.display="block";
+    data = j; fillForm(); renderStatus();
+    clearInterval(timer);
+    timer = setInterval(refreshStatus, 10000);
+  }
+
+  function refreshStatus(){
+    api("GET","/control/settings").then(function(j){ data.status = j.status; data.drafts = j.drafts; data.secrets = j.secrets; renderStatus(); }).catch(function(){});
+  }
+
+  function fillForm(){
+    var s = data.settings, c = data.secrets;
+    setSwitch(s.enabled);
+    $("#forumUrl").value = c.forumUrl || "";
+    $("#botUser").value = c.botUser || "";
+    $("#botPass").value = ""; $("#botPass").placeholder = c.hasBotPass ? "••••••• (שמורה)" : "";
+    $("#geminiKey").value = ""; $("#geminiKey").placeholder = c.hasGeminiKey ? "••••••••" + c.geminiKeyLast4 + " (שמור)" : "";
+    $("#model").value = c.model || "";
+    $("#mode").value = s.mode;
+    $("#pollSeconds").value = s.pollSeconds;
+    $("#maxPerHour").value = s.maxPerHour;
+    $("#maxAgeMinutes").value = s.maxAgeMinutes;
+    document.querySelectorAll("[data-f]").forEach(function(x){ x.checked = s.filters.indexOf(x.dataset.f) >= 0; });
+    $("#categories").value = s.categories.join(",");
+    $("#solvedTags").value = s.solvedTags.join(",");
+    $("#alwaysOn").checked = s.schedule.alwaysOn;
+    $("#pauseShabbat").checked = s.schedule.pauseShabbat;
+    $("#timezone").value = s.schedule.timezone;
+    windows = JSON.parse(JSON.stringify(s.schedule.windows));
+    renderWindows();
+    $("#customPrompt").value = s.customPrompt || "";
+    $("#signature").value = s.signature || "";
+  }
+
+  function setSwitch(on){ var b = $("#enabledSwitch"); b.classList.toggle("on", !!on); b.dataset.on = on ? "1" : "0"; }
+  $("#enabledSwitch").onclick = function(){ setSwitch(this.dataset.on !== "1"); saveSettings(); };
+
+  function readWindows(){
+    return windows.map(function(w,i){
+      var days=[]; document.querySelectorAll('[data-w="'+i+'"][data-day]').forEach(function(x){ if(x.checked) days.push(+x.dataset.day); });
+      return { days: days,
+        from: document.querySelector('[data-w="'+i+'"][data-k="from"]').value || "08:00",
+        to: document.querySelector('[data-w="'+i+'"][data-k="to"]').value || "22:00" };
+    });
+  }
+
+  function renderWindows(){
+    $("#wins").innerHTML = windows.map(function(w,i){
+      var days = DAYS.map(function(d,n){ return '<label class="day"><input type="checkbox" data-w="'+i+'" data-day="'+n+'"'+(w.days.indexOf(n)>=0?" checked":"")+'> '+d+'</label>'; }).join("");
+      return '<div class="win">'+days+'<div class="row"><div><label>מהשעה</label><input type="time" data-w="'+i+'" data-k="from" value="'+w.from+'"></div>'+
+        '<div><label>עד השעה</label><input type="time" data-w="'+i+'" data-k="to" value="'+w.to+'"></div></div>'+
+        '<button class="gray" data-del="'+i+'">מחק חלון</button></div>';
+    }).join("") || '<div class="note">אין חלונות זמן. הבוט לא יפעל אלא אם סימנת "פעיל תמיד".</div>';
+    document.querySelectorAll("[data-del]").forEach(function(b){
+      b.onclick = function(){ windows = readWindows(); windows.splice(+b.dataset.del,1); renderWindows(); };
+    });
+  }
+  $("#addWin").onclick = function(){ windows = readWindows(); windows.push({days:[0,1,2,3,4,5],from:"08:00",to:"22:00"}); renderWindows(); };
+
+  function readSettings(){
+    var f=[]; document.querySelectorAll("[data-f]").forEach(function(x){ if(x.checked) f.push(x.dataset.f); });
+    return {
+      enabled: $("#enabledSwitch").dataset.on === "1",
+      mode: $("#mode").value,
+      pollSeconds: +$("#pollSeconds").value,
+      maxPerHour: +$("#maxPerHour").value,
+      maxAgeMinutes: +$("#maxAgeMinutes").value,
+      filters: f,
+      categories: $("#categories").value.split(",").map(function(x){return parseInt(x,10)}).filter(function(n){return n>0}),
+      solvedTags: $("#solvedTags").value.split(",").map(function(x){return x.trim()}).filter(Boolean),
+      customPrompt: $("#customPrompt").value,
+      signature: $("#signature").value,
+      schedule: { alwaysOn: $("#alwaysOn").checked, pauseShabbat: $("#pauseShabbat").checked,
+                  timezone: $("#timezone").value.trim() || "Asia/Jerusalem", windows: readWindows() }
+    };
+  }
+
+  function saveSettings(){
+    api("POST","/control/settings", readSettings()).then(function(j){ data=j; fillForm(); renderStatus(); toast("נשמר", true); })
+      .catch(function(e){ toast(e.message, false); });
+  }
+  $("#saveTop").onclick = saveSettings; $("#saveBottom").onclick = saveSettings;
+
+  $("#saveSecrets").onclick = function(){
+    api("POST","/control/secrets",{ forumUrl:$("#forumUrl").value, botUser:$("#botUser").value, botPass:$("#botPass").value,
+      geminiKey:$("#geminiKey").value, model:$("#model").value })
+      .then(function(j){ data=j; fillForm(); renderStatus(); toast("החיבורים נשמרו", true); })
+      .catch(function(e){ toast(e.message, false); });
+  };
+  function action(path, body, btn){
+    if (btn) btn.disabled = true;
+    api("POST", path, body).then(function(j){ toast(j.result || "בוצע", true); refreshStatus(); })
+      .catch(function(e){ toast(e.message, false); refreshStatus(); })
+      .then(function(){ if (btn) btn.disabled = false; });
+  }
+  $("#testLogin").onclick = function(){ action("/control/test-login", {}, this); };
+  $("#testGemini").onclick = function(){ action("/control/test-gemini", {}, this); };
+  $("#runNow").onclick = function(){ action("/control/run-now", {}, this); };
+  $("#answerNow").onclick = function(){
+    var v = $("#topicRef").value.trim(); if (!v) return toast("הזן מספר נושא או קישור", false);
+    if (confirm("להפעיל את הבוט על הנושא הזה עכשיו?")) action("/control/answer-now", {tid: v}, this);
+  };
+  $("#resetAnswered").onclick = function(){
+    if (confirm("הבוט עלול לענות שוב על נושאים שכבר טופלו. להמשיך?")) action("/control/reset-answered", {}, this);
+  };
+
+  function pill(ok, text){ return '<span class="pill '+(ok?"ok":"bad")+'">'+(ok?"✓ ":"✗ ")+text+'</span>'; }
+
+  function renderStatus(){
+    var st = data.status, s = data.settings;
+    $("#pills").innerHTML =
+      pill(st.configured.user && st.configured.pass, "חשבון בוט") +
+      pill(st.configured.gemini, "מפתח Gemini") +
+      pill(st.loggedIn, "מחובר לפורום") +
+      pill(st.inSchedule, "בתוך שעות הפעילות") +
+      '<span class="pill">תגובות בשעה האחרונה: '+st.repliesLastHour+'/'+s.maxPerHour+'</span>' +
+      '<span class="pill">נושאים שטופלו: '+st.answeredCount+'</span>';
+    var lg = $("#log"), atBottom = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 20;
+    lg.textContent = st.log.join("\n") || "אין אירועים עדיין";
+    if (atBottom) lg.scrollTop = lg.scrollHeight;
+    renderDrafts();
+  }
+
+  var draftsKey = "";
+  function renderDrafts(){
+    var key = data.drafts.map(function(d){return d.id}).join(",");
+    $("#draftCount").textContent = data.drafts.length ? "(" + data.drafts.length + ")" : "";
+    if (key === draftsKey) return; // לא מוחקים עריכה שמתבצעת עכשיו
+    draftsKey = key;
+    var box = $("#drafts");
+    if (!data.drafts.length) { box.className = "note"; box.textContent = "אין טיוטות"; return; }
+    box.className = ""; box.innerHTML = "";
+    data.drafts.forEach(function(d){
+      var div = document.createElement("div"); div.className = "draft";
+      var h = document.createElement("div"); h.innerHTML = "<b></b> <span class='note'></span>";
+      h.querySelector("b").textContent = d.title || ("נושא " + d.tid);
+      h.querySelector("span").textContent = "(נושא " + d.tid + ")";
+      var ta = document.createElement("textarea"); ta.value = d.content;
+      var ok = document.createElement("button"); ok.className = "green"; ok.textContent = "אשר ופרסם";
+      var no = document.createElement("button"); no.className = "red"; no.textContent = "דחה";
+      ok.onclick = function(){ ok.disabled = true;
+        api("POST","/control/draft",{id:d.id, action:"approve", content: ta.value}).then(function(j){ data=j; draftsKey=""; renderStatus(); toast("פורסם", true); })
+          .catch(function(e){ ok.disabled=false; toast(e.message,false); }); };
+      no.onclick = function(){ api("POST","/control/draft",{id:d.id, action:"reject"}).then(function(j){ data=j; draftsKey=""; renderStatus(); }).catch(function(e){ toast(e.message,false); }); };
+      div.append(h, ta, ok, no); box.appendChild(div);
+    });
+  }
+
+  if (token) {
+    api("GET","/control/settings").then(start).catch(showLogin);
+  } else showLogin();
+})();
+</script>
+</body>
+</html>

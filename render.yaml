@@ -3,17 +3,9 @@ services:
     name: forum-bot
     runtime: node
     plan: free
-    buildCommand: npm ci
+    buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /health
     envVars:
-      - key: FORUM_URL
-        value: https://mitmachim.top
-      - key: BOT_USER
-        sync: false
-      - key: BOT_PASS
-        sync: false
-      - key: GEMINI_KEY
-        sync: false
       - key: ADMIN_TOKEN
         generateValue: true
