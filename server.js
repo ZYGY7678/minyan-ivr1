@@ -636,7 +636,7 @@ async function answerTopic(tid, { force = false, replyToPid = null, forcePublish
   // Do not spend an AI call while an automatic post is not yet allowed.
   if (state.settings.mode !== "draft" || forcePublish) {
     const waitMs = replyTimingWaitMs();
-    if (waitMs > 0) return replyTimingMessage(waitMs);
+    if (waitMs > 0) { recordTopicActivity(tid, topic.title, "ממתין לתור", replyTimingMessage(waitMs)); return replyTimingMessage(waitMs); }
   }
   const answer = await askGemini(prompt);
   if (!answer || answer.trim() === "SKIP") { recordTopicActivity(tid, topic.title, "דולג", "המודל החליט לא לענות"); return "דילוג (המודל החליט לא לענות)"; }
