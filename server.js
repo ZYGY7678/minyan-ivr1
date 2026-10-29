@@ -657,35 +657,22 @@ async function answerTopic(tid, { force = false, replyToPid = null, forcePublish
 
 let busy = false;
 
-function notificationTopicId(notification) {
-  const known = Number(notification && notification.tid);
-  if (Number.isInteger(known) && known > 0) return known;
-  const p = String((notification && notification.path) || "");
-  // Standard NodeBB topic path commonly includes /topic/{tid}/...
-  let m = p.match(/\/topic\/(\d+)(?:\/|$)/i);
-  if (m) return Number(m[1]);
-  // Also tolerate /topic/{slug}/{tid}/...
-  m = p.match(/\/topic\/[^/]+\/(\d+)(?:\/|$)/i);
-  if (m) return Number(m[1]);
-  return 0;
-}
-
 let mentionPollStatus = { lastCheckAt: 0, lastSuccessAt: 0, lastError: "", source: "", unreadCount: 0 };
 
 function notificationTopicId(notification) {
-  const known = Number(notification && (notification.tid || notification.topic && notification.topic.tid));
+  const known = Number(notification && (notification.tid || (notification.topic && notification.topic.tid)));
   if (Number.isInteger(known) && known > 0) return known;
   const p = String((notification && (notification.path || notification.url)) || "");
-  let m = p.match(/\\/topic\\/(\\d+)(?:\\/|$)/i);
+  let m = p.match(/\/topic\/(\d+)(?:\/|$)/i);
   if (m) return Number(m[1]);
-  m = p.match(/\\/topic\\/[^/]+\\/(\\d+)(?:\\/|$)/i);
+  m = p.match(/\/topic\/[^/]+\/(\d+)(?:\/|$)/i);
   if (m) return Number(m[1]);
   return 0;
 }
 
 function postMentionsBot(post, username) {
   if (!post || !username) return false;
-  const candidates = [username, username.replace(/\\s+/g, "_"), username.replace(/\\s+/g, "-")]
+  const candidates = [username, username.replace(/\s+/g, "_"), username.replace(/\s+/g, "-")]
     .map((x) => x.trim().toLowerCase()).filter(Boolean);
   const content = stripHtml([post.content, post.raw, post.text, post.topic && post.topic.title].filter(Boolean).join(" ")).toLowerCase();
   if (candidates.some((name) => content.includes("@" + name))) return true;
@@ -718,23 +705,23 @@ async function readMentionItems() {
 
   // Fallback for installations where the notifications API returns 401 despite topic APIs working.
   const recent = await getJson("/api/recent/posts/all?page=1");
-  const posts = Array.isArray(recent.posts) ? recent.posts : Array.isArray(recent.recentPosts) ? recent.recentPosts : [];
+  const posts = Array.isArray(recent.posts) ? recent.posts : (Array.isArray(recent.recentPosts) ? recent.recentPosts : []);
   const items = [];
   for (const post of posts) {
     const pid = Number(post.pid || post.id) || 0;
-    const tid = Number(post.tid || post.topic && post.topic.tid) || 0;
+    const tid = Number(post.tid || (post.topic && post.topic.tid)) || 0;
     if (!pid || !tid || Number(post.uid) === Number(botUid) || !postMentionsBot(post, cfg().user)) continue;
     const nid = "post:" + pid;
     if (state.processedMentions[nid]) continue;
     items.push({
-      nid, tid, pid, type: "mention", read: false,
+      nid: nid, tid: tid, pid: pid, type: "mention", read: false,
       datetime: Number(post.timestamp || post.datetime) || Date.now(),
       path: "/topic/" + tid, _fallback: true,
-      _title: post.topic && post.topic.title || post.title || ("נושא " + tid),
+      _title: (post.topic && post.topic.title) || post.title || ("נושא " + tid),
     });
   }
   mentionPollStatus = { lastCheckAt: Date.now(), lastSuccessAt: Date.now(), lastError: notificationError, source: "recent-posts", unreadCount: items.length };
-  if (!tickMentions.lastErrorLog || Date.now() - tickMentions.lastErrorLog > 60_000) {
+  if (!tickMentions.lastErrorLog || Date.now() - tickMentions.lastErrorLog > 60000) {
     log("קריאת ההתראות של NodeBB נכשלה; הופעלה סריקה חלופית של פוסטים אחרונים" + (notificationError ? ": " + notificationError : ""));
     tickMentions.lastErrorLog = Date.now();
   }
@@ -764,17 +751,17 @@ async function tickMentions() {
 
       if (!tid && pid) {
         try {
-          const response = await req(`/api/post/${encodeURIComponent(pid)}`, { redirect: "manual" });
+          const response = await req("/api/post/" + encodeURIComponent(pid), { redirect: "manual" });
           const location = response.headers.get("location") || "";
           const found = notificationTopicId({ path: location });
           if (found) tid = found;
         } catch (_) {}
       }
       if (!tid) {
-        log(`התראת תיוג ${nid} התקבלה, אבל לא הצלחתי לזהות נושא — תיבדק שוב בסבב הבא`);
+        log("התראת תיוג " + nid + " התקבלה, אבל לא הצלחתי לזהות נושא — תיבדק שוב בסבב הבא");
         continue;
       }
-      // Keep checking/recording mentions during reply cooldowns, but do not consume them until eligible.
+      // Keep checking mentions during reply cooldowns, but do not consume them until eligible.
       if (replyTimingWaitMs() > 0 || repliesLastHour() >= s.maxPerHour) break;
 
       state.processedMentions[nid] = Date.now();
@@ -789,24 +776,24 @@ async function tickMentions() {
         if (result.startsWith("לא נמצא הפוסט שתויג")) {
           delete state.processedMentions[nid];
           saveState();
-          log(`התראת תיוג ${nid} ממתינה לניסיון חוזר: ${result}`);
+          log("התראת תיוג " + nid + " ממתינה לניסיון חוזר: " + result);
           continue;
         }
         state.answered[tid] = Date.now();
         if (notification._fallback) recordTopicActivity(tid, notification._title, result === "נענה" ? "נענה" : result);
         saveState();
-        log(`התראת תיוג ${nid}, נושא ${tid}: ${result}`);
+        log("התראת תיוג " + nid + ", נושא " + tid + ": " + result);
       } catch (e) {
         delete state.processedMentions[nid];
         recordTopicActivity(tid, notification._title, "שגיאה", e.message);
         saveState();
-        log(`שגיאה בתגובה להתראת תיוג ${nid}: ${e.message}`);
+        log("שגיאה בתגובה להתראת תיוג " + nid + ": " + e.message);
       }
     }
   } catch (e) {
     mentionPollStatus.lastError = e.message;
-    if (!tickMentions.lastErrorLog || Date.now() - tickMentions.lastErrorLog > 60_000) {
-      log(`בדיקת התראות/תיוגים נכשלה גם בסריקה החלופית: ${e.message}`);
+    if (!tickMentions.lastErrorLog || Date.now() - tickMentions.lastErrorLog > 60000) {
+      log("בדיקת התראות/תיוגים נכשלה גם בסריקה החלופית: " + e.message);
       tickMentions.lastErrorLog = Date.now();
     }
   } finally {
