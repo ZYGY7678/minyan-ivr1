@@ -53,6 +53,31 @@ const DEFAULT_SETTINGS = {
 
 let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {}, topicActivity: [], lastReplyAt: 0, repliesInCycle: 0, pauseUntil: 0, replyTimestamps: [] };
 
+let activeTopics = [];
+
+function topicUrl(tid) {
+  return String(cfg().forum || "").replace(/\/$/, "") + "/topic/" + encodeURIComponent(String(tid));
+}
+
+function setActiveTopic(tid, title, source, phase) {
+  const key = String(tid);
+  const previous = activeTopics.find((item) => String(item.tid) === key);
+  activeTopics = activeTopics.filter((item) => String(item.tid) !== key);
+  activeTopics.push({
+    tid: Number(tid) || 0,
+    title: String(title || ("נושא " + tid)).slice(0, 240),
+    url: topicUrl(tid),
+    source: String(source || "סריקה"),
+    phase: String(phase || "בטיפול"),
+    startedAt: previous ? previous.startedAt : Date.now(),
+    updatedAt: Date.now(),
+  });
+}
+
+function clearActiveTopic(tid) {
+  activeTopics = activeTopics.filter((item) => String(item.tid) !== String(tid));
+}
+
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const clamp = (n, lo, hi, d) => {
   n = parseInt(n, 10);
@@ -399,14 +424,17 @@ async function refreshConfig() {
   return j;
 }
 
-async function login() {
+async function login(options = {}) {
   const c = cfg();
+  const forcePassword = !!options.forcePassword;
   cookies = {};
   botUid = null;
-  if (!c.session && (!c.user || !c.pass)) throw new Error("חסרה התחברות: הזן עוגיית session (מהדף הרשמי) או שם משתמש וסיסמה");
+  if ((!c.session || forcePassword) && (!c.user || !c.pass)) {
+    throw new Error("חסרה התחברות: הזן עוגיית session (מהדף הרשמי) או שם משתמש וסיסמה");
+  }
 
-  // שלב 1: התחברות דרך הדף הרשמי (עוגיית session שהמשתמש קיבל מהפורום עצמו)
-  if (c.session) {
+  // שלב 1: שימוש בעוגיית session שסופקה מהדפדפן, אלא אם נדרש רענון מלא עם סיסמה.
+  if (c.session && !forcePassword) {
     cookies = { "express.sid": c.session };
     const uid = await currentUid();
     if (uid) {
@@ -464,10 +492,15 @@ function explainLoginFailure(status, text) {
 async function getJson(p) {
   let res = await req(p);
   if (res.status === 401 || res.status === 403) {
-    await login();
+    const c = cfg();
+    if (res.status === 401 && c.user && c.pass) await login({ forcePassword: true });
+    else await login();
     res = await req(p);
   }
-  if (!res.ok) throw new Error(`${p} -> ${res.status}`);
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 180);
+    throw new Error(`${p} -> ${res.status}${detail ? ": " + detail : ""}`);
+  }
   return res.json();
 }
 
@@ -622,67 +655,106 @@ function recordTopicActivity(tid, title, status, detail = "") {
   saveState();
 }
 
-async function answerTopic(tid, { force = false, replyToPid = null, forcePublish = false } = {}) {
-  if (!botUid) await login();
-  let topic = await getJson(`/api/topic/${tid}`);
-  if (replyToPid) {
-    const page = await topicPageForPost(tid, replyToPid);
-    if (page && Array.isArray(page.posts) && page.posts.length) topic = page;
-  }
-  recordTopicActivity(tid, topic.title, "מכין תשובה");
-  if (topic.locked || topic.deleted) { recordTopicActivity(tid, topic.title, "דולג", "הנושא נעול או נמחק"); return "הנושא נעול או נמחק"; }
-  const posts = Array.isArray(topic.posts) ? topic.posts : [];
-  if (!posts.length) { recordTopicActivity(tid, topic.title, "דולג", "אין פוסטים בנושא"); return "אין פוסטים בנושא"; }
-  let last = posts[posts.length - 1];
-  if (replyToPid) {
-    const mentionedPost = posts.find((p) => String(p.pid) === String(replyToPid));
-    if (mentionedPost) last = mentionedPost;
-    else return "לא נמצא הפוסט שתויג בהתראה, דילוג כדי לא להשיב להודעה הלא נכונה";
-  }
-  if (!force && String(last.uid) === String(botUid)) { recordTopicActivity(tid, topic.title, "כבר נענה", "הבוט כבר ענה אחרון"); return "הבוט כבר ענה אחרון"; }
+async function answerTopic(tid, {
+  force = false,
+  replyToPid = null,
+  forcePublish = false,
+  source = "סריקה רגילה",
+} = {}) {
+  setActiveTopic(tid, "נושא " + tid, source, "טוען את הנושא");
+  try {
+    if (!botUid) await login();
+    let topic = await getJson(`/api/topic/${tid}`);
+    if (replyToPid) {
+      const page = await topicPageForPost(tid, replyToPid);
+      if (page && Array.isArray(page.posts) && page.posts.length) topic = page;
+    }
 
-  const lastIndex = posts.findIndex((p) => String(p.pid) === String(last.pid));
-  const beforeTarget = lastIndex >= 0 ? posts.slice(0, lastIndex + 1) : posts;
-  const recent = beforeTarget.length > 6 ? [beforeTarget[0], ...beforeTarget.slice(-5)] : beforeTarget;
-  const ctx = recent
-    .map((p) => `@${p.user?.username || "?"}:\n${stripHtml(p.content).slice(0, 2500)}`)
-    .join("\n\n---\n\n");
-  const targetUsername = last.user?.username || last.username || "";
-  const prompt = `כותרת: ${topic.title}\nתגיות: ${(topic.tags || []).map((t) => t.value).join(", ")}\n\nשרשור עד ההודעה שאליה צריך להשיב:\n${ctx}\n\nענה ישירות להודעה האחרונה בשרשור שמוצג, מאת @${targetUsername}. אם יש צורך, התייחס במפורש לשאלה או לבקשה בהודעה זו.`;
+    const title = topic.title || ("נושא " + tid);
+    setActiveTopic(tid, title, source, "בודק את ההודעות");
+    recordTopicActivity(tid, title, "מכין תשובה", source);
 
-  // Do not spend an AI call while an automatic post is not yet allowed.
-  if (state.settings.mode !== "draft" || forcePublish) {
-    const waitMs = replyTimingWaitMs();
-    if (waitMs > 0) { recordTopicActivity(tid, topic.title, "ממתין לתור", replyTimingMessage(waitMs)); return replyTimingMessage(waitMs); }
+    if (topic.locked || topic.deleted) {
+      recordTopicActivity(tid, title, "דולג", "הנושא נעול או נמחק");
+      return "הנושא נעול או נמחק";
+    }
+    const posts = Array.isArray(topic.posts) ? topic.posts : [];
+    if (!posts.length) {
+      recordTopicActivity(tid, title, "דולג", "אין פוסטים בנושא");
+      return "אין פוסטים בנושא";
+    }
+
+    let last = posts[posts.length - 1];
+    if (replyToPid) {
+      const mentionedPost = posts.find((p) => String(p.pid) === String(replyToPid));
+      if (mentionedPost) last = mentionedPost;
+      else {
+        recordTopicActivity(tid, title, "ממתין לתיעוד התיוג", "לא נמצא הפוסט שאליו תויג הבוט");
+        return "לא נמצא הפוסט שתויג בהתראה, דילוג כדי לא להשיב להודעה הלא נכונה";
+      }
+    }
+    if (!force && String(last.uid) === String(botUid)) {
+      recordTopicActivity(tid, title, "כבר נענה", "הבוט כבר ענה אחרון");
+      return "הבוט כבר ענה אחרון";
+    }
+
+    const lastIndex = posts.findIndex((p) => String(p.pid) === String(last.pid));
+    const beforeTarget = lastIndex >= 0 ? posts.slice(0, lastIndex + 1) : posts;
+    const recent = beforeTarget.length > 6 ? [beforeTarget[0], ...beforeTarget.slice(-5)] : beforeTarget;
+    const ctx = recent
+      .map((p) => `@${p.user?.username || "?"}:\n${stripHtml(p.content).slice(0, 2500)}`)
+      .join("\n\n---\n\n");
+    const targetUsername = last.user?.username || last.username || "";
+    const prompt = `כותרת: ${topic.title}\nתגיות: ${(topic.tags || []).map((t) => t.value).join(", ")}\n\nשרשור עד ההודעה שאליה צריך להשיב:\n${ctx}\n\nענה ישירות להודעה האחרונה בשרשור שמוצג, מאת @${targetUsername}. אם יש צורך, התייחס במפורש לשאלה או לבקשה בהודעה זו.`;
+
+    if (state.settings.mode !== "draft" || forcePublish) {
+      const waitMs = replyTimingWaitMs();
+      if (waitMs > 0) {
+        recordTopicActivity(tid, title, "ממתין לתור", replyTimingMessage(waitMs));
+        return replyTimingMessage(waitMs);
+      }
+    }
+
+    setActiveTopic(tid, title, source, "מייצר תשובה");
+    recordTopicActivity(tid, title, "מייצר תשובה", source);
+    const answer = await askGemini(prompt);
+    if (!answer || answer.trim() === "SKIP") {
+      recordTopicActivity(tid, title, "דולג", "המודל החליט לא לענות");
+      return "דילוג (המודל החליט לא לענות)";
+    }
+
+    const content = answer + state.settings.signature;
+    const toPid = last.pid ? Number(last.pid) : null;
+
+    if (state.settings.mode === "draft" && !forcePublish) {
+      state.drafts.push({ id: crypto.randomUUID(), tid: Number(tid), title: topic.title, content, toPid, created: Date.now() });
+      saveState();
+      recordTopicActivity(tid, title, "טיוטה ממתינה לאישור", source);
+      return "נשמרה טיוטה לאישור";
+    }
+
+    setActiveTopic(tid, title, source, "מפרסם תשובה בפורום");
+    recordTopicActivity(tid, title, "מפרסם תשובה", source);
+    await postReply(tid, content, toPid);
+    recordTopicActivity(tid, title, "נענה", source);
+    return "נענה";
+  } finally {
+    clearActiveTopic(tid);
   }
-  const answer = await askGemini(prompt);
-  if (!answer || answer.trim() === "SKIP") { recordTopicActivity(tid, topic.title, "דולג", "המודל החליט לא לענות"); return "דילוג (המודל החליט לא לענות)"; }
-
-  const content = answer + state.settings.signature;
-  const toPid = last.pid ? Number(last.pid) : null;
-
-  if (state.settings.mode === "draft" && !forcePublish) {
-    state.drafts.push({ id: crypto.randomUUID(), tid: Number(tid), title: topic.title, content, toPid, created: Date.now() });
-    saveState();
-    recordTopicActivity(tid, topic.title, "טיוטה ממתינה לאישור");
-    return "נשמרה טיוטה לאישור";
-  }
-  await postReply(tid, content, toPid);
-  recordTopicActivity(tid, topic.title, "נענה");
-  return "נענה";
 }
-
 let busy = false;
 
 let mentionPollStatus = { lastCheckAt: 0, lastSuccessAt: 0, lastError: "", source: "", unreadCount: 0 };
 
 function notificationTopicId(notification) {
-  const known = Number(notification && (notification.tid || (notification.topic && notification.topic.tid)));
+  const known = Number(notification && (notification.tid || notification.topicId || (notification.topic && notification.topic.tid)));
   if (Number.isInteger(known) && known > 0) return known;
-  const p = String((notification && (notification.path || notification.url)) || "");
-  let m = p.match(/\/topic\/(\d+)(?:\/|$)/i);
+  const raw = String((notification && (notification.path || notification.url)) || "");
+  let p = raw;
+  try { p = new URL(raw, cfg().forum).pathname; } catch (_) {}
+  let m = p.match(/\/topic\/(\d+)(?:\/|$|[?#])/i);
   if (m) return Number(m[1]);
-  m = p.match(/\/topic\/[^/]+\/(\d+)(?:\/|$)/i);
+  m = p.match(/\/topic\/[^/?#]+\/(\d+)(?:\/|$|[?#])/i);
   if (m) return Number(m[1]);
   return 0;
 }
@@ -708,43 +780,84 @@ async function readMentionItems() {
     const unreadIds = Array.isArray(data.unreadNids) ? new Set(data.unreadNids.map(String)) : null;
     const unread = notifications.filter((n) => {
       if (!n || !n.nid) return false;
-      const type = String(n.type || "").toLowerCase();
-      const text = String(n.bodyShort || n.bodyLong || "").toLowerCase();
-      const isMention = type.includes("mention") || text.includes("mentioned you") || text.includes("תייג");
+      const type = String(n.type || n.notificationType || "").toLowerCase();
+      const text = String([n.bodyShort, n.bodyLong, n.body, n.title].filter(Boolean).join(" ")).toLowerCase();
+      const isMention = /mention|tag/.test(type) ||
+        /mentioned\s+you|tagged\s+you|תיוג|תייג|תויג|הזכיר(?:ה)? אותך|הוזכרת|הוזכר(?:ת|ה|תם|ו)?/i.test(text);
       if (!isMention || state.processedMentions[String(n.nid)]) return false;
       return unreadIds ? unreadIds.has(String(n.nid)) : n.read === false;
     });
-    mentionPollStatus = { lastCheckAt: Date.now(), lastSuccessAt: Date.now(), lastError: "", source: "notifications", unreadCount: unread.length };
+    mentionPollStatus = {
+      lastCheckAt: Date.now(), lastSuccessAt: Date.now(), lastError: "",
+      source: "notifications", unreadCount: unread.length,
+    };
     return unread.sort((a, b) => Number(a.datetime || 0) - Number(b.datetime || 0));
   } catch (e) {
     notificationError = e.message;
   }
 
-  // Fallback for installations where the notifications API returns 401 despite topic APIs working.
-  const recent = await getJson("/api/recent/posts/all?page=1");
-  const posts = Array.isArray(recent.posts) ? recent.posts : (Array.isArray(recent.recentPosts) ? recent.recentPosts : []);
+  // NodeBB documents /api/recent/posts/{term} with term=day/week/month.
+  // The response is an array directly; /all is not a valid term.
+  let fallbackError = "";
   const items = [];
-  for (const post of posts) {
-    const pid = Number(post.pid || post.id) || 0;
-    const tid = Number(post.tid || (post.topic && post.topic.tid)) || 0;
-    if (!pid || !tid || Number(post.uid) === Number(botUid) || !postMentionsBot(post, cfg().user)) continue;
-    const nid = "post:" + pid;
-    if (state.processedMentions[nid]) continue;
-    items.push({
-      nid: nid, tid: tid, pid: pid, type: "mention", read: false,
-      datetime: Number(post.timestamp || post.datetime) || Date.now(),
-      path: "/topic/" + tid, _fallback: true,
-      _title: (post.topic && post.topic.title) || post.title || ("נושא " + tid),
-    });
+  try {
+    const recent = await getJson("/api/recent/posts/day?page=1");
+    const posts = Array.isArray(recent) ? recent :
+      (Array.isArray(recent.posts) ? recent.posts :
+        (Array.isArray(recent.recentPosts) ? recent.recentPosts : []));
+    let username = String(cfg().user || "").trim();
+    if (!username) {
+      try {
+        const me = await getJson("/api/me");
+        username = String(me.username || me.user?.username || me.loggedInUser?.username || me.userslug || "").trim();
+      } catch (_) {}
+    }
+    const cutoff = Date.now() - 24 * 60 * 60_000;
+    for (const post of posts) {
+      const pid = Number(post && (post.pid || post.id)) || 0;
+      const tid = Number(post && (post.tid || (post.topic && post.topic.tid))) || 0;
+      let timestamp = Number(post && (post.timestamp || post.datetime || post.createdAt)) || 0;
+      if (timestamp > 0 && timestamp < 1_000_000_000_000) timestamp *= 1000;
+      if (!pid || !tid || (timestamp && timestamp < cutoff)) continue;
+      if (Number(post.uid || (post.user && post.user.uid)) === Number(botUid)) continue;
+      if (!username || !postMentionsBot(post, username)) continue;
+      const nid = "post:" + pid;
+      if (state.processedMentions[nid]) continue;
+      items.push({
+        nid,
+        tid,
+        pid,
+        uid: Number(post.uid || (post.user && post.user.uid)) || 0,
+        type: "mention",
+        read: false,
+        datetime: timestamp || Date.now(),
+        path: (post.path || post.url || ("/topic/" + tid)),
+        _fallback: true,
+        _title: (post.topic && post.topic.title) || post.topicTitle || post.title || ("נושא " + tid),
+      });
+    }
+  } catch (e) {
+    fallbackError = e.message;
   }
-  mentionPollStatus = { lastCheckAt: Date.now(), lastSuccessAt: Date.now(), lastError: notificationError, source: "recent-posts", unreadCount: items.length };
-  if (!tickMentions.lastErrorLog || Date.now() - tickMentions.lastErrorLog > 60000) {
-    log("קריאת ההתראות של NodeBB נכשלה; הופעלה סריקה חלופית של פוסטים אחרונים" + (notificationError ? ": " + notificationError : ""));
-    tickMentions.lastErrorLog = Date.now();
+
+  const now = Date.now();
+  mentionPollStatus = {
+    lastCheckAt: now,
+    lastSuccessAt: fallbackError ? (mentionPollStatus.lastSuccessAt || 0) : now,
+    lastError: notificationError + (fallbackError ? " | סריקה חלופית: " + fallbackError : ""),
+    source: "recent-posts",
+    unreadCount: items.length,
+  };
+  if (!tickMentions.lastErrorLog || now - tickMentions.lastErrorLog > 60000) {
+    log(fallbackError
+      ? "קריאת ההתראות נכשלה וגם הסריקה החלופית נכשלה: " + fallbackError
+      : "קריאת ההתראות של NodeBB נכשלה; הסריקה החלופית סרקה פוסטים מהיממה האחרונה" +
+        (notificationError ? ": " + notificationError : ""));
+    tickMentions.lastErrorLog = now;
   }
+  if (fallbackError) throw new Error("קריאת התראות נכשלה (" + notificationError + "); גם הסריקה החלופית נכשלה (" + fallbackError + ")");
   return items.sort((a, b) => Number(a.datetime || 0) - Number(b.datetime || 0));
 }
-
 async function tickMentions() {
   const s = state.settings;
   const c = cfg();
@@ -784,7 +897,7 @@ async function tickMentions() {
       state.processedMentions[nid] = Date.now();
       saveState();
       try {
-        const result = await answerTopic(tid, { force: true, replyToPid: pid || null, forcePublish: true });
+        const result = await answerTopic(tid, { force: true, replyToPid: pid || null, forcePublish: true, source: "התראת תיוג" });
         if (result.startsWith("ממתין למרווח") || result.startsWith("הבוט בהפסקה")) {
           delete state.processedMentions[nid];
           saveState();
@@ -949,6 +1062,7 @@ function statusObj() {
         lastReplyAt: state.lastReplyAt,
       },
       answeredCount: Object.keys(state.answered).length,
+      activeTopics: activeTopics.slice().sort((a, b) => a.startedAt - b.startedAt),
       mentionMonitor: { ...mentionPollStatus },
       serverTime: new Date().toISOString(),
       log: logBuf.slice(-40),
@@ -1059,7 +1173,7 @@ const server = http.createServer(async (rq, rs) => {
         const m = String(b.tid || "").match(/topic\/(\d+)/) || String(b.tid || "").match(/^(\d+)$/);
         if (!m) return json(400, { error: "הזן מספר נושא או קישור לנושא" });
         const tid = Number(m[1]);
-        const r = await answerTopic(tid, { force: true });
+        const r = await answerTopic(tid, { force: true, source: "ידני" });
         state.answered[tid] = Date.now();
         saveState();
         log(`ידני, נושא ${tid}: ${r}`);
