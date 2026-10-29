@@ -97,7 +97,7 @@
     <div class="row">
       <div><label for="mode">מצב פרסום</label>
         <select id="mode"><option value="auto">אוטומטי מלא (מפרסם לבד)</option><option value="draft">טיוטה לאישור שלי</option></select></div>
-      <div><label for="pollSeconds">סריקה כל (שניות)</label><input type="number" id="pollSeconds" min="30" max="3600"></div>
+      <div><label for="pollMinutes">סריקה אוטומטית כל (דקות)</label><input type="number" id="pollMinutes" min="1" max="60" step="1" value="2"><div class="note">סריקת נושאים חדשים; התראות תיוג נבדקות בנפרד כל כ־10 שניות.</div></div>
     </div>
     <div class="row">
       <div><label for="maxPerHour">מקסימום תגובות בשעה</label><input type="number" id="maxPerHour" min="1" max="60"></div>
@@ -224,7 +224,7 @@
     $("#geminiKey").value = ""; $("#geminiKey").placeholder = c.hasGeminiKey ? "••••••••" + c.geminiKeyLast4 + " (שמור)" : "";
     $("#model").value = c.model || "";
     $("#mode").value = s.mode;
-    $("#pollSeconds").value = s.pollSeconds;
+    $("#pollMinutes").value = Math.min(60, Math.max(1, Math.round((Number(s.pollSeconds) || 120) / 60)));
     $("#maxPerHour").value = s.maxPerHour;
     $("#maxAgeMinutes").value = s.maxAgeMinutes;
     document.querySelectorAll("[data-f]").forEach(function(x){ x.checked = s.filters.indexOf(x.dataset.f) >= 0; });
@@ -271,7 +271,7 @@
       enabled: $("#enabledSwitch").dataset.on === "1",
       mode: $("#mode").value,
       respondToMentions: $("#respondToMentions").checked,
-      pollSeconds: +$("#pollSeconds").value,
+      pollSeconds: Math.min(60, Math.max(1, Number($("#pollMinutes").value) || 2)) * 60,
       maxPerHour: +$("#maxPerHour").value,
       maxAgeMinutes: +$("#maxAgeMinutes").value,
       filters: f,
