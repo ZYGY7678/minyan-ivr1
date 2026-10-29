@@ -107,6 +107,8 @@
 
   <div class="card">
     <h2>🎯 אילו נושאים לענות</h2>
+    <label class="chk"><input type="checkbox" id="respondToMentions" checked> להגיב כשמתייגים את הבוט בהתראה</label>
+    <div class="note">בדיקת התראות תיוג מתבצעת בערך כל 10 שניות כשהבוט פעיל. יתר הסינונים למטה חלים על סריקת נושאים רגילה.</div>
     <div class="note">כל הסימונים שנבחרו חייבים להתקיים יחד.</div>
     <label class="chk"><input type="checkbox" data-f="all"> הכל (בלי סינון)</label>
     <label class="chk"><input type="checkbox" data-f="unanswered"> רק נושאים בלי תגובות</label>
@@ -226,6 +228,7 @@
     $("#maxPerHour").value = s.maxPerHour;
     $("#maxAgeMinutes").value = s.maxAgeMinutes;
     document.querySelectorAll("[data-f]").forEach(function(x){ x.checked = s.filters.indexOf(x.dataset.f) >= 0; });
+    $("#respondToMentions").checked = s.respondToMentions !== false;
     $("#categories").value = s.categories.join(",");
     $("#solvedTags").value = s.solvedTags.join(",");
     $("#alwaysOn").checked = s.schedule.alwaysOn;
@@ -267,6 +270,7 @@
     return {
       enabled: $("#enabledSwitch").dataset.on === "1",
       mode: $("#mode").value,
+      respondToMentions: $("#respondToMentions").checked,
       pollSeconds: +$("#pollSeconds").value,
       maxPerHour: +$("#maxPerHour").value,
       maxAgeMinutes: +$("#maxAgeMinutes").value,
@@ -321,6 +325,7 @@
     $("#pills").innerHTML =
       pill(st.configured.user && st.configured.pass, "חשבון בוט") +
       pill(st.configured.gemini, "מפתח Gemini") +
+      pill(s.respondToMentions !== false, "תגובה לתיוגים") +
       pill(st.loggedIn, "מחובר לפורום") +
       pill(st.inSchedule, "בתוך שעות הפעילות") +
       '<span class="pill">תגובות בשעה האחרונה: '+st.repliesLastHour+'/'+s.maxPerHour+'</span>' +
