@@ -652,7 +652,13 @@ async function tick() {
 
 async function loop() {
   try { await tick(); } catch (_) {}
-  setTimeout(loop, state.settings.pollSeconds * 1000);
+  let delayMs = state.settings.pollSeconds * 1000;
+  // Wake at the exact next eligible reply time when it is sooner than the scan interval.
+  if (state.settings.enabled && state.settings.mode !== "draft" && state.settings.replyCycleEnabled) {
+    const waitMs = replyTimingWaitMs();
+    if (waitMs > 0) delayMs = Math.min(delayMs, waitMs);
+  }
+  setTimeout(loop, Math.max(1000, delayMs));
 }
 
 async function mentionLoop() {
