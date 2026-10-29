@@ -11,6 +11,15 @@ const crypto = require("crypto");
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const STATE_FILE = path.join(DATA_DIR, "state.json");
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const REMOTE_STORE_CONFIGURED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+const REMOTE_STORE_REQUIRED = Boolean(process.env.RENDER_SERVICE_ID);
+let remoteStoreReady = false;
+let remoteStoreLastError = "";
+let remoteStoreLastSuccess = 0;
+let remoteStoreQueue = Promise.resolve();
+let remoteStoreLastErrorLogAt = 0;
 
 if (ADMIN_TOKEN.length < 8) {
   console.error("חסר ADMIN_TOKEN (לפחות 8 תווים). זו הסיסמה לאתר השליטה.");
@@ -42,7 +51,7 @@ const DEFAULT_SETTINGS = {
   },
 };
 
-let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {}, lastReplyAt: 0, repliesInCycle: 0, pauseUntil: 0 };
+let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {}, lastReplyAt: 0, repliesInCycle: 0, pauseUntil: 0, replyTimestamps: [] };
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const clamp = (n, lo, hi, d) => {
@@ -98,22 +107,136 @@ function sanitizeSettings(s) {
 function loadState() {
   try {
     const raw = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-    state.settings = sanitizeSettings({ ...DEFAULT_SETTINGS, ...(raw.settings || {}) });
-    state.secrets = raw.secrets && typeof raw.secrets === "object" ? raw.secrets : {};
-    state.answered = raw.answered || {};
-    state.drafts = Array.isArray(raw.drafts) ? raw.drafts : [];
-    state.processedMentions = raw.processedMentions && typeof raw.processedMentions === "object" ? raw.processedMentions : {};
-    state.lastReplyAt = Number(raw.lastReplyAt) > 0 ? Number(raw.lastReplyAt) : 0;
-    state.repliesInCycle = Number.isFinite(Number(raw.repliesInCycle)) ? Math.max(0, Number(raw.repliesInCycle)) : 0;
-    state.pauseUntil = Number(raw.pauseUntil) > 0 ? Number(raw.pauseUntil) : 0;
+    applyStateSnapshot(raw);
   } catch (_) {
     /* אין קובץ עדיין */
   }
 }
 
-function saveState() {
+function applyStateSnapshot(raw) {
+  if (!raw || typeof raw !== "object") throw new Error("מצב שמור במסד הנתונים אינו תקין");
+  state.settings = sanitizeSettings({ ...DEFAULT_SETTINGS, ...(raw.settings || {}) });
+  state.secrets = raw.secrets && typeof raw.secrets === "object" ? raw.secrets : {};
+  state.answered = raw.answered && typeof raw.answered === "object" ? raw.answered : {};
+  state.drafts = Array.isArray(raw.drafts) ? raw.drafts : [];
+  state.processedMentions = raw.processedMentions && typeof raw.processedMentions === "object" ? raw.processedMentions : {};
+  state.lastReplyAt = Number(raw.lastReplyAt) > 0 ? Number(raw.lastReplyAt) : 0;
+  state.repliesInCycle = Number.isFinite(Number(raw.repliesInCycle)) ? Math.max(0, Number(raw.repliesInCycle)) : 0;
+  state.pauseUntil = Number(raw.pauseUntil) > 0 ? Number(raw.pauseUntil) : 0;
+  state.replyTimestamps = Array.isArray(raw.replyTimestamps) ? raw.replyTimestamps.map(Number).filter((t) => Number.isFinite(t) && t > 0) : [];
+  if (typeof repliesLog !== "undefined") repliesLog = state.replyTimestamps.filter((t) => t > Date.now() - 3600_000);
+}
+
+function statePayload() {
+  const hourAgo = Date.now() - 3600_000;
+  state.replyTimestamps = (Array.isArray(state.replyTimestamps) ? state.replyTimestamps : [])
+    .filter((t) => Number(t) > hourAgo).slice(-200);
+  return JSON.stringify(state);
+}
+
+function writeLocalState() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
+  } catch (e) {
+    console.error("שמירת עותק מקומי נכשלה:", e.message);
+  }
+}
+
+function remoteStoreHeaders(extra = {}) {
+  return {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    "Content-Type": "application/json",
+    ...extra,
+  };
+}
+
+async function touchRemoteStore() {
+  if (!REMOTE_STORE_CONFIGURED || !remoteStoreReady) return;
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/forum_bot_state?select=id&limit=1`, {
+    headers: remoteStoreHeaders({ "Cache-Control": "no-store" }),
+  });
+  if (!response.ok) throw new Error(`Supabase heartbeat ${response.status}`);
+}
+
+async function remoteStoreRead() {
+  const url = `${SUPABASE_URL}/rest/v1/forum_bot_state?id=eq.main&select=payload&limit=1`;
+  const response = await fetch(url, { headers: remoteStoreHeaders({ "Cache-Control": "no-store" }) });
+  if (!response.ok) throw new Error(`Supabase read ${response.status}: ${(await response.text()).slice(0, 240)}`);
+  const rows = await response.json();
+  if (!Array.isArray(rows)) throw new Error("Supabase החזיר תשובה לא צפויה");
+  return rows[0] && rows[0].payload ? rows[0].payload : null;
+}
+
+async function remoteStoreWrite(payloadText) {
+  const url = `${SUPABASE_URL}/rest/v1/forum_bot_state?on_conflict=id`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: remoteStoreHeaders({ Prefer: "resolution=merge-duplicates,return=minimal" }),
+    body: JSON.stringify({ id: "main", payload: JSON.parse(payloadText), updated_at: new Date().toISOString() }),
+  });
+  if (!response.ok) throw new Error(`Supabase write ${response.status}: ${(await response.text()).slice(0, 240)}`);
+}
+
+function enqueueRemoteState(payloadText) {
+  remoteStoreQueue = remoteStoreQueue.then(async () => {
+    await remoteStoreWrite(payloadText);
+    remoteStoreLastError = "";
+    remoteStoreLastSuccess = Date.now();
+  }).catch((e) => {
+    remoteStoreLastError = e.message;
+    if (!remoteStoreLastErrorLogAt || Date.now() - remoteStoreLastErrorLogAt > 60_000) {
+      log(`שמירה למסד הנתונים נכשלה: ${e.message}`);
+      remoteStoreLastErrorLogAt = Date.now();
+    }
+  });
+  return remoteStoreQueue;
+}
+
+async function flushRemoteState() {
+  if (!REMOTE_STORE_CONFIGURED) return true;
+  if (!remoteStoreReady) throw new Error("מסד הנתונים הקבוע אינו מוכן. בדוק את SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY ואת הטבלה forum_bot_state.");
+  await enqueueRemoteState(statePayload());
+  if (remoteStoreLastError) throw new Error(`השמירה הקבועה נכשלה: ${remoteStoreLastError}`);
+  return true;
+}
+
+async function initializeRemoteStore() {
+  if (!REMOTE_STORE_CONFIGURED) {
+    if (REMOTE_STORE_REQUIRED) {
+      log("אזהרה: לא הוגדר מסד נתונים קבוע. הבוט מושהה עד להגדרת SUPABASE_URL ו-SUPABASE_SERVICE_ROLE_KEY ב-Render.");
+    } else {
+      remoteStoreReady = true;
+      log("מצב פיתוח: נשמר עותק מקומי בלבד; הוא אינו שורד פריסה מחדש.");
+    }
+    return;
+  }
+  try {
+    const remote = await remoteStoreRead();
+    if (remote) {
+      applyStateSnapshot(remote);
+      writeLocalState();
+      remoteStoreReady = true;
+      remoteStoreLastSuccess = Date.now();
+      log("הנתונים שוחזרו ממסד הנתונים הקבוע");
+      await enqueueRemoteState(statePayload());
+    } else {
+      remoteStoreReady = true;
+      log("מסד הנתונים הקבוע ריק; מאתחל אותו מהמצב המקומי הנוכחי");
+      await enqueueRemoteState(statePayload());
+    }
+    if (remoteStoreLastError) throw new Error(remoteStoreLastError);
+    log("שמירה קבועה פעילה");
+  } catch (e) {
+    remoteStoreReady = false;
+    remoteStoreLastError = e.message;
+    log(`שגיאה בהפעלת מסד הנתונים הקבוע: ${e.message}. הבוט ימתין עד לתיקון ההגדרות.`);
+  }
+}
+
+function saveState() {
+  try {
     const entries = Object.entries(state.answered).sort((a, b) => b[1] - a[1]).slice(0, 500);
     state.answered = Object.fromEntries(entries);
     state.drafts = state.drafts.slice(-50);
@@ -121,7 +244,10 @@ function saveState() {
       .sort((a, b) => Number(b[1]) - Number(a[1]))
       .slice(0, 1000);
     state.processedMentions = Object.fromEntries(processed);
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
+    state.replyTimestamps = (Array.isArray(repliesLog) ? repliesLog : state.replyTimestamps || [])
+      .filter((t) => Number(t) > Date.now() - 3600_000).slice(-200);
+    writeLocalState();
+    if (REMOTE_STORE_CONFIGURED && remoteStoreReady) enqueueRemoteState(statePayload());
   } catch (e) {
     console.error("שמירת מצב נכשלה:", e.message);
   }
@@ -527,7 +653,9 @@ function notificationTopicId(notification) {
 async function tickMentions() {
   const s = state.settings;
   const c = cfg();
-  if (busy || !s.enabled || s.respondToMentions === false ||
+  if ((REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) ||
+      (REMOTE_STORE_CONFIGURED && !remoteStoreReady) ||
+      busy || !s.enabled || s.respondToMentions === false ||
       !(c.session || (c.user && c.pass)) || !c.gemini) return;
   if (replyTimingWaitMs() > 0) return;
 
@@ -608,7 +736,9 @@ async function tickMentions() {
 async function tick() {
   const s = state.settings;
   const c = cfg();
-  if (busy || !s.enabled || !(c.session || (c.user && c.pass)) || !c.gemini || !inSchedule()) return;
+  if ((REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) ||
+      (REMOTE_STORE_CONFIGURED && !remoteStoreReady) ||
+      busy || !s.enabled || !(c.session || (c.user && c.pass)) || !c.gemini || !inSchedule()) return;
   if (s.mode !== "draft" && replyTimingWaitMs() > 0) return;
   busy = true;
   try {
@@ -713,6 +843,15 @@ function statusObj() {
     secrets: secretsView(),
     drafts: state.drafts,
     status: {
+      storage: {
+        configured: REMOTE_STORE_CONFIGURED,
+        required: REMOTE_STORE_REQUIRED,
+        ready: remoteStoreReady,
+        durable: REMOTE_STORE_CONFIGURED && remoteStoreReady && !remoteStoreLastError,
+        provider: REMOTE_STORE_CONFIGURED ? "Supabase" : "local ephemeral file",
+        lastSavedAt: remoteStoreLastSuccess || 0,
+        error: remoteStoreLastError || "",
+      },
       configured: { user: !!c.user || !!c.session, pass: !!c.pass || !!c.session, gemini: !!c.gemini },
       loggedIn: !!botUid,
       inSchedule: inSchedule(),
@@ -742,7 +881,19 @@ const server = http.createServer(async (rq, rs) => {
     rs.end(JSON.stringify(obj));
   };
 
-  if (url.pathname === "/health") return rs.end("ok");
+  if (url.pathname === "/health") {
+    if (REMOTE_STORE_CONFIGURED && remoteStoreReady) {
+      touchRemoteStore().catch((e) => {
+        remoteStoreLastError = e.message;
+        if (!remoteStoreLastErrorLogAt || Date.now() - remoteStoreLastErrorLogAt > 60_000) {
+          log(`בדיקת מסד הנתונים נכשלה: ${e.message}`);
+          remoteStoreLastErrorLogAt = Date.now();
+        }
+      });
+    }
+    rs.setHeader("Cache-Control", "no-store");
+    return rs.end("ok");
+  }
 
   if (url.pathname === "/" || url.pathname === "/index.html") {
     try {
@@ -768,6 +919,9 @@ const server = http.createServer(async (rq, rs) => {
 
       if (route === "POST /control/settings") {
         const b = await readBody(rq);
+        if (REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) {
+          return json(503, { error: "שמירה קבועה לא מוגדרת. הגדר תחילה SUPABASE_URL ו-SUPABASE_SERVICE_ROLE_KEY ב-Render." });
+        }
         const wasCycleEnabled = state.settings.replyCycleEnabled;
         state.settings = sanitizeSettings({ ...state.settings, ...b });
         if (wasCycleEnabled !== state.settings.replyCycleEnabled) {
@@ -776,14 +930,25 @@ const server = http.createServer(async (rq, rs) => {
           state.lastReplyAt = 0;
         }
         saveState();
+        if (REMOTE_STORE_CONFIGURED) {
+          try { await flushRemoteState(); }
+          catch (e) { return json(503, { error: e.message }); }
+        }
         log("הגדרות עודכנו");
         setTimeout(tick, 500);
         return json(200, statusObj());
       }
 
       if (route === "POST /control/secrets") {
+        if (REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) {
+          return json(503, { error: "שמירה קבועה לא מוגדרת. הגדר תחילה SUPABASE_URL ו-SUPABASE_SERVICE_ROLE_KEY ב-Render." });
+        }
         updateSecrets(await readBody(rq));
         saveState();
+        if (REMOTE_STORE_CONFIGURED) {
+          try { await flushRemoteState(); }
+          catch (e) { return json(503, { error: e.message }); }
+        }
         log("פרטי חיבור עודכנו");
         return json(200, statusObj());
       }
@@ -799,6 +964,9 @@ const server = http.createServer(async (rq, rs) => {
       }
 
       if (route === "POST /control/answer-now") {
+        if (REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) {
+          return json(503, { error: "הבוט ממתין להגדרת שמירה קבועה ב-Render." });
+        }
         const b = await readBody(rq);
         const m = String(b.tid || "").match(/topic\/(\d+)/) || String(b.tid || "").match(/^(\d+)$/);
         if (!m) return json(400, { error: "הזן מספר נושא או קישור לנושא" });
@@ -816,6 +984,9 @@ const server = http.createServer(async (rq, rs) => {
       }
 
       if (route === "POST /control/reset-answered") {
+        if (REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) {
+          return json(503, { error: "הבוט ממתין להגדרת שמירה קבועה ב-Render." });
+        }
         state.answered = {};
         saveState();
         log("רשימת הנושאים שנענו אופסה");
@@ -823,6 +994,9 @@ const server = http.createServer(async (rq, rs) => {
       }
 
       if (route === "POST /control/draft") {
+        if (REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) {
+          return json(503, { error: "הבוט ממתין להגדרת שמירה קבועה ב-Render." });
+        }
         const b = await readBody(rq);
         const i = state.drafts.findIndex((d) => d.id === b.id);
         if (i < 0) return json(404, { error: "טיוטה לא נמצאה" });
@@ -850,7 +1024,18 @@ const server = http.createServer(async (rq, rs) => {
 });
 
 loadState();
-saveState();
+repliesLog = state.replyTimestamps.filter((t) => t > Date.now() - 3600_000);
+writeLocalState();
 server.listen(process.env.PORT || 3000, () => log("השרת עלה"));
-setTimeout(loop, 5000);
-setTimeout(mentionLoop, 7000);
+initializeRemoteStore().then(() => {
+  if (REMOTE_STORE_REQUIRED && (!REMOTE_STORE_CONFIGURED || !remoteStoreReady)) {
+    log("הבוט האוטומטי מושהה עד שהשמירה הקבועה תתחבר בהצלחה");
+    return;
+  }
+  if (REMOTE_STORE_CONFIGURED && !remoteStoreReady) {
+    log("הבוט מושהה כי מסד הנתונים הקבוע אינו זמין");
+    return;
+  }
+  setTimeout(loop, 5000);
+  setTimeout(mentionLoop, 7000);
+});
