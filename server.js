@@ -573,6 +573,11 @@ async function tickMentions() {
       saveState();
       try {
         const result = await answerTopic(tid, { force: true, replyToPid: pid || null, forcePublish: true });
+        if (result.startsWith("ממתין למרווח") || result.startsWith("הבוט בהפסקה")) {
+          delete state.processedMentions[nid];
+          saveState();
+          break;
+        }
         if (result.startsWith("לא נמצא הפוסט שתויג")) {
           delete state.processedMentions[nid];
           saveState();
@@ -634,7 +639,13 @@ async function tick() {
       state.answered[t.tid] = now;
       saveState();
       try {
-        log(`נושא ${t.tid} "${t.title}": ${await answerTopic(t.tid)}`);
+        const result = await answerTopic(t.tid);
+        if (result.startsWith("ממתין למרווח") || result.startsWith("הבוט בהפסקה")) {
+          delete state.answered[t.tid];
+          saveState();
+          break;
+        }
+        log(`נושא ${t.tid} "${t.title}": ${result}`);
       } catch (e) {
         delete state.answered[t.tid];
         saveState();
