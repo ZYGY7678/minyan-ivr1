@@ -75,6 +75,13 @@
       <div><label for="botUser">שם משתמש של הבוט</label><input type="text" id="botUser" dir="ltr" autocomplete="off"></div>
       <div><label for="botPass">סיסמת הבוט</label><input type="password" id="botPass" dir="ltr" autocomplete="new-password"></div>
     </div>
+    <div class="note" style="margin-top:10px"><b>התחברות דרך הדף הרשמי של הפורום (מומלץ, עובד גם עם אימות דו-שלבי):</b><br>
+      1. לחץ על הכפתור, היכנס בדף ההתחברות הרשמי עם חשבון הבוט.<br>
+      2. בדפדפן: F12 ← Application ← Cookies ← העתק את הערך של <code dir="ltr">express.sid</code>.<br>
+      3. הדבק למטה ושמור. הסיסמה לא עוברת דרך האתר הזה.</div>
+    <button class="gray" id="openForumLogin" type="button">🔐 פתח את דף ההתחברות הרשמי</button>
+    <label for="sessionCookie">עוגיית session (express.sid)</label>
+    <input type="password" id="sessionCookie" dir="ltr" autocomplete="new-password">
     <label for="geminiKey">מפתח Gemini API</label>
     <input type="password" id="geminiKey" dir="ltr" autocomplete="new-password">
     <label for="model">מודל Gemini</label>
@@ -211,6 +218,7 @@
     $("#forumUrl").value = c.forumUrl || "";
     $("#botUser").value = c.botUser || "";
     $("#botPass").value = ""; $("#botPass").placeholder = c.hasBotPass ? "••••••• (שמורה)" : "";
+    $("#sessionCookie").value = ""; $("#sessionCookie").placeholder = c.hasSession ? "••••••• (שמורה)" : "";
     $("#geminiKey").value = ""; $("#geminiKey").placeholder = c.hasGeminiKey ? "••••••••" + c.geminiKeyLast4 + " (שמור)" : "";
     $("#model").value = c.model || "";
     $("#mode").value = s.mode;
@@ -279,7 +287,7 @@
   $("#saveTop").onclick = saveSettings; $("#saveBottom").onclick = saveSettings;
 
   $("#saveSecrets").onclick = function(){
-    api("POST","/control/secrets",{ forumUrl:$("#forumUrl").value, botUser:$("#botUser").value, botPass:$("#botPass").value,
+    api("POST","/control/secrets",{ forumUrl:$("#forumUrl").value, botUser:$("#botUser").value, botPass:$("#botPass").value, sessionCookie:$("#sessionCookie").value,
       geminiKey:$("#geminiKey").value, model:$("#model").value })
       .then(function(j){ data=j; fillForm(); renderStatus(); toast("החיבורים נשמרו", true); })
       .catch(function(e){ toast(e.message, false); });
@@ -290,6 +298,11 @@
       .catch(function(e){ toast(e.message, false); refreshStatus(); })
       .then(function(){ if (btn) btn.disabled = false; });
   }
+  $("#openForumLogin").onclick = function(){
+    var u = ($("#forumUrl").value.trim() || "https://mitmachim.top").replace(/\/$/, "");
+    if (!/^https?:\/\//.test(u)) return toast("כתובת פורום לא תקינה", false);
+    window.open(u + "/login", "_blank", "noopener");
+  };
   $("#testLogin").onclick = function(){ action("/control/test-login", {}, this); };
   $("#testGemini").onclick = function(){ action("/control/test-gemini", {}, this); };
   $("#runNow").onclick = function(){ action("/control/run-now", {}, this); };
