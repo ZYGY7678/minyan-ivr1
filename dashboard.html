@@ -86,6 +86,10 @@
   .switch{width:64px;height:35px;border-radius:99px;background:#9299ad;position:relative;cursor:pointer;flex:none;border:none;padding:0;margin:0;box-shadow:none}
   .switch::after{content:"";position:absolute;top:4px;right:4px;width:27px;height:27px;border-radius:50%;background:#fff;transition:.2s;box-shadow:0 2px 7px #0002}
   .switch.on{background:linear-gradient(135deg,#12a874,#39c99a)}.switch.on::after{right:33px}
+  .interval-presets{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+  .interval-presets button{min-width:76px;margin:0}
+  .interval-presets button.selected{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border-color:transparent;box-shadow:0 6px 15px rgba(91,92,226,.17)}
+  #replyCycleHint{margin-top:10px;padding:12px 14px;border-radius:12px;background:var(--soft);line-height:1.65}
   #pills{display:flex;flex-wrap:wrap;gap:3px;margin:14px 0}
   .card hr{border:0;border-top:1px solid var(--line)}
   @media(max-width:600px){
@@ -167,6 +171,26 @@
       <div><label for="maxPerHour">מקסימום תגובות בשעה</label><input type="number" id="maxPerHour" min="1" max="60"></div>
       <div><label for="maxAgeMinutes">לא לענות על נושאים ישנים מ (דקות)</label><input type="number" id="maxAgeMinutes" min="5"></div>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>⏱️ תזמון אוטומטי של תגובות</h2>
+    <label class="chk"><input type="checkbox" id="replyCycleEnabled"> הפעל קצב תגובות מחזורי</label>
+    <div class="note">לדוגמה: תגובה אחת כל 3 דקות; אחרי 10 תגובות הבוט עוצר ל־30 דקות ואז ממשיך במחזור חדש. הספירה מתבצעת רק אחרי שתגובה פורסמה בהצלחה, וההפסקה חלה גם על תשובות בעקבות תיוג.</div>
+    <div class="interval-presets" role="group" aria-label="בחירת מרווח בין תגובות">
+      <button type="button" class="gray" data-reply-min="1">כל דקה</button>
+      <button type="button" class="gray" data-reply-min="2">כל 2 דקות</button>
+      <button type="button" class="gray" data-reply-min="3">כל 3 דקות</button>
+      <button type="button" class="gray" data-reply-min="5">כל 5 דקות</button>
+      <button type="button" class="gray" data-reply-min="10">כל 10 דקות</button>
+    </div>
+    <div class="row">
+      <div><label for="replyIntervalMinutes">מרווח בין תגובות (דקות)</label><input type="number" id="replyIntervalMinutes" min="1" max="60" step="1" value="3"></div>
+      <div><label for="repliesPerCycle">מספר תגובות לפני הפסקה</label><input type="number" id="repliesPerCycle" min="1" max="100" step="1" value="10"></div>
+      <div><label for="pauseAfterCycleMinutes">משך ההפסקה (דקות)</label><input type="number" id="pauseAfterCycleMinutes" min="1" max="1440" step="1" value="30"></div>
+    </div>
+    <button id="saveReplyCycle" type="button">שמור תזמון תגובות</button>
+    <div class="note" id="replyCycleHint">ברירת המחדל: תגובה כל 3 דקות, ולאחר 10 תגובות הפסקה של 30 דקות.</div>
   </div>
 
   <div class="card">
@@ -289,6 +313,12 @@
     $("#model").value = c.model || "";
     $("#mode").value = s.mode;
     $("#pollMinutes").value = Math.min(60, Math.max(1, Math.round((Number(s.pollSeconds) || 120) / 60)));
+    $("#replyCycleEnabled").checked = s.replyCycleEnabled !== false;
+    $("#replyIntervalMinutes").value = Math.min(60, Math.max(1, Number(s.replyIntervalMinutes) || 3));
+    $("#repliesPerCycle").value = Math.min(100, Math.max(1, Number(s.repliesPerCycle) || 10));
+    $("#pauseAfterCycleMinutes").value = Math.min(1440, Math.max(1, Number(s.pauseAfterCycleMinutes) || 30));
+    updateReplyPresets();
+    updateReplyCycleHint();
     $("#maxPerHour").value = s.maxPerHour;
     $("#maxAgeMinutes").value = s.maxAgeMinutes;
     document.querySelectorAll("[data-f]").forEach(function(x){ x.checked = s.filters.indexOf(x.dataset.f) >= 0; });
@@ -336,6 +366,10 @@
       mode: $("#mode").value,
       respondToMentions: $("#respondToMentions").checked,
       pollSeconds: Math.min(60, Math.max(1, Number($("#pollMinutes").value) || 2)) * 60,
+      replyCycleEnabled: $("#replyCycleEnabled").checked,
+      replyIntervalMinutes: Math.min(60, Math.max(1, Math.round(Number($("#replyIntervalMinutes").value) || 3))),
+      repliesPerCycle: Math.min(100, Math.max(1, Math.round(Number($("#repliesPerCycle").value) || 10))),
+      pauseAfterCycleMinutes: Math.min(1440, Math.max(1, Math.round(Number($("#pauseAfterCycleMinutes").value) || 30))),
       maxPerHour: +$("#maxPerHour").value,
       maxAgeMinutes: +$("#maxAgeMinutes").value,
       filters: f,
@@ -348,6 +382,63 @@
     };
   }
 
+  function updateReplyPresets(){
+    var value = Math.min(60, Math.max(1, Math.round(Number($("#replyIntervalMinutes").value) || 3)));
+    document.querySelectorAll("[data-reply-min]").forEach(function(b){
+      var active = Number(b.dataset.replyMin) === value;
+      b.classList.toggle("selected", active);
+      b.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  }
+  function updateReplyCycleHint(status){
+    var enabled = $("#replyCycleEnabled").checked;
+    var interval = Math.min(60, Math.max(1, Math.round(Number($("#replyIntervalMinutes").value) || 3)));
+    var count = Math.min(100, Math.max(1, Math.round(Number($("#repliesPerCycle").value) || 10)));
+    var pause = Math.min(1440, Math.max(1, Math.round(Number($("#pauseAfterCycleMinutes").value) || 30)));
+    var base = enabled
+      ? "פעיל: תגובה לכל " + interval + " דקות; אחרי " + count + " תגובות הפסקה של " + pause + " דקות."
+      : "התזמון המחזורי כבוי. הבוט יפעל לפי מרווח הסריקה ומגבלות הפורום.";
+    var rt = status && status.replyTiming;
+    if (enabled && rt && rt.pauseUntil && rt.pauseUntil > Date.now()) {
+      base += " כרגע בהפסקה עד " + new Date(rt.pauseUntil).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"}) + ".";
+    } else if (enabled && rt) {
+      base += " במחזור הנוכחי: " + (rt.repliesInCycle || 0) + " מתוך " + count + " תגובות.";
+    }
+    $("#replyCycleHint").textContent = base;
+  }
+  function saveReplyCycle(btn){
+    var values = {
+      replyCycleEnabled: $("#replyCycleEnabled").checked,
+      replyIntervalMinutes: Math.min(60, Math.max(1, Math.round(Number($("#replyIntervalMinutes").value) || 3))),
+      repliesPerCycle: Math.min(100, Math.max(1, Math.round(Number($("#repliesPerCycle").value) || 10))),
+      pauseAfterCycleMinutes: Math.min(1440, Math.max(1, Math.round(Number($("#pauseAfterCycleMinutes").value) || 30)))
+    };
+    if (values.replyCycleEnabled) {
+      $("#pollMinutes").value = values.replyIntervalMinutes;
+      values.pollSeconds = values.replyIntervalMinutes * 60;
+    }
+    if(btn) btn.disabled = true;
+    api("POST","/control/settings", values).then(function(j){
+      data = j;
+      fillForm();
+      renderStatus();
+      toast("תזמון התגובות נשמר", true);
+    }).catch(function(e){ toast(e.message,false); })
+      .then(function(){ if(btn) btn.disabled = false; });
+  }
+  $("#replyIntervalMinutes").addEventListener("input", updateReplyPresets);
+  $("#replyCycleEnabled").addEventListener("change", function(){ updateReplyCycleHint(); });
+  ["#replyIntervalMinutes","#repliesPerCycle","#pauseAfterCycleMinutes"].forEach(function(id){
+    $(id).addEventListener("input", function(){ updateReplyCycleHint(); });
+  });
+  document.querySelectorAll("[data-reply-min]").forEach(function(b){
+    b.onclick = function(){
+      $("#replyIntervalMinutes").value = Number(b.dataset.replyMin);
+      updateReplyPresets();
+      updateReplyCycleHint();
+    };
+  });
+  $("#saveReplyCycle").onclick = function(){ saveReplyCycle(this); };
   function saveSettings(){
     api("POST","/control/settings", readSettings()).then(function(j){ data=j; fillForm(); renderStatus(); toast("נשמר", true); })
       .catch(function(e){ toast(e.message, false); });
@@ -392,11 +483,14 @@
       pill(s.respondToMentions !== false, "תגובה לתיוגים") +
       pill(st.loggedIn, "מחובר לפורום") +
       pill(st.inSchedule, "בתוך שעות הפעילות") +
+      '<span class="pill">'+(s.replyCycleEnabled !== false ? 'קצב תגובות: כל '+(s.replyIntervalMinutes || 3)+' דק׳' : 'קצב מחזורי כבוי')+'</span>' +
+      (st.replyTiming && st.replyTiming.pauseUntil > Date.now() ? '<span class="pill bad">בהפסקה עד '+new Date(st.replyTiming.pauseUntil).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})+'</span>' : '') +
       '<span class="pill">תגובות בשעה האחרונה: '+st.repliesLastHour+'/'+s.maxPerHour+'</span>' +
       '<span class="pill">נושאים שטופלו: '+st.answeredCount+'</span>';
     var lg = $("#log"), atBottom = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 20;
     lg.textContent = st.log.join("\n") || "אין אירועים עדיין";
     if (atBottom) lg.scrollTop = lg.scrollHeight;
+    updateReplyCycleHint(st);
     renderDrafts();
   }
 
