@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = {
   maxPerHour: 4,
   maxAgeMinutes: 180,
   pollSeconds: 120,
+  replyIntervalMinutes: 2,
   solvedTags: ["נפתר", "solved"],
   signature: "\n\n---\n*תשובה זו נכתבה אוטומטית על ידי בוט.*",
   customPrompt: "",
@@ -38,7 +39,7 @@ const DEFAULT_SETTINGS = {
   },
 };
 
-let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {} };
+let state = { settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), secrets: {}, answered: {}, drafts: [], processedMentions: {}, lastReplyAt: 0 };
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const clamp = (n, lo, hi, d) => {
@@ -61,6 +62,7 @@ function sanitizeSettings(s) {
   out.maxPerHour = clamp(s.maxPerHour, 1, 60, d.maxPerHour);
   out.maxAgeMinutes = clamp(s.maxAgeMinutes, 5, 10080, d.maxAgeMinutes);
   out.pollSeconds = clamp(s.pollSeconds, 30, 3600, d.pollSeconds);
+  out.replyIntervalMinutes = clamp(s.replyIntervalMinutes, 1, 60, d.replyIntervalMinutes);
   out.solvedTags = Array.isArray(s.solvedTags) ? s.solvedTags.map(String).filter(Boolean).slice(0, 10) : d.solvedTags;
   out.signature = typeof s.signature === "string" ? s.signature.slice(0, 300) : d.signature;
   out.customPrompt = typeof s.customPrompt === "string" ? s.customPrompt.slice(0, 3000) : "";
@@ -95,6 +97,7 @@ function loadState() {
     state.answered = raw.answered || {};
     state.drafts = Array.isArray(raw.drafts) ? raw.drafts : [];
     state.processedMentions = raw.processedMentions && typeof raw.processedMentions === "object" ? raw.processedMentions : {};
+    state.lastReplyAt = Number(raw.lastReplyAt) > 0 ? Number(raw.lastReplyAt) : 0;
   } catch (_) {
     /* אין קובץ עדיין */
   }
@@ -366,16 +369,32 @@ function isSolved(t) {
   return solvedTags.some((w) => (t.title || "").includes(w));
 }
 
+let publishBusy = false;
 async function postReply(tid, content, toPid) {
-  const body = { content };
-  if (toPid) body.toPid = toPid;
-  const res = await req(`/api/v3/topics/${tid}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`פרסום נכשל ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  repliesLog.push(Date.now());
+  if (publishBusy) throw new Error("פרסום אחר מתבצע כרגע. נסה שוב בסבב הבא");
+  const intervalMs = (Number(state.settings.replyIntervalMinutes) || 2) * 60_000;
+  const waitMs = intervalMs - (Date.now() - (Number(state.lastReplyAt) || 0));
+  if (waitMs > 0) {
+    const remaining = Math.ceil(waitMs / 60_000);
+    throw new Error(`מרווח התגובות מוגדר ל-${state.settings.replyIntervalMinutes} דקות; אפשר לפרסם שוב בעוד כ-${remaining} דקות`);
+  }
+  publishBusy = true;
+  try {
+    const body = { content };
+    if (toPid) body.toPid = toPid;
+    const res = await req(`/api/v3/topics/${tid}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`פרסום נכשל ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const postedAt = Date.now();
+    repliesLog.push(postedAt);
+    state.lastReplyAt = postedAt;
+    saveState();
+  } finally {
+    publishBusy = false;
+  }
 }
 
 async function topicPageForPost(tid, pid) {
@@ -576,6 +595,8 @@ async function tick() {
       try {
         log(`נושא ${t.tid} "${t.title}": ${await answerTopic(t.tid)}`);
       } catch (e) {
+        delete state.answered[t.tid];
+        saveState();
         log(`שגיאה בנושא ${t.tid}: ${e.message}`);
       }
       await new Promise((r) => setTimeout(r, 15_000));
