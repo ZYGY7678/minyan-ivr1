@@ -72,6 +72,7 @@
   .log{background:#0b1020;color:#9df5bb;border:1px solid #27324c;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;
     direction:ltr;text-align:left;white-space:pre-wrap;max-height:300px;overflow:auto;padding:15px;border-radius:15px}
   .draft{border:1px solid var(--line);background:var(--field);border-radius:15px;padding:14px;margin:10px 0}
+  #topicActivity a{color:var(--accent);font-weight:800;text-decoration:none}#topicActivity a:hover{text-decoration:underline}
   .note{color:var(--muted);font-size:12px;line-height:1.7}
   code{background:var(--soft);border-radius:6px;padding:2px 5px}
   #toast{position:fixed;bottom:18px;right:16px;left:16px;max-width:440px;margin:auto;padding:13px 17px;border-radius:14px;
@@ -228,6 +229,12 @@
   </div>
 
   <div class="card">
+    <h2>📌 נושאים שהבוט מטפל בהם והגיב להם לאחרונה</h2>
+    <div class="note" id="topicActivityHint">הנושאים והקישורים מתעדכנים אוטומטית.</div>
+    <div id="topicActivity" class="note">עדיין אין פעילות מתועדת.</div>
+  </div>
+
+  <div class="card">
     <h2>📝 טיוטות לאישור <span id="draftCount"></span></h2>
     <div id="drafts" class="note">אין טיוטות</div>
   </div>
@@ -299,7 +306,7 @@
   }
 
   function refreshStatus(){
-    api("GET","/control/settings").then(function(j){ data.status = j.status; data.drafts = j.drafts; data.secrets = j.secrets; renderStatus(); }).catch(function(){});
+    api("GET","/control/settings").then(function(j){ data.status = j.status; data.drafts = j.drafts; data.secrets = j.secrets; data.topicActivity = j.topicActivity || []; renderStatus(); }).catch(function(){});
   }
 
   function fillForm(){
@@ -487,6 +494,7 @@
       pill(st.configured.user && st.configured.pass, "חשבון בוט") +
       pill(st.configured.gemini, "מפתח Gemini") +
       pill(s.respondToMentions !== false, "תגובה לתיוגים") +
+      pill(!!(st.mentionMonitor && st.mentionMonitor.lastSuccessAt), st.mentionMonitor && st.mentionMonitor.source === "recent-posts" ? "תיוגים: סריקה חלופית" : "קריאת התראות") +
       pill(st.loggedIn, "מחובר לפורום") +
       pill(st.inSchedule, "בתוך שעות הפעילות") +
       '<span class="pill">'+(s.replyCycleEnabled !== false ? 'קצב תגובות: כל '+(s.replyIntervalMinutes || 3)+' דק׳' : 'קצב מחזורי כבוי')+'</span>' +
@@ -496,8 +504,39 @@
     var lg = $("#log"), atBottom = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 20;
     lg.textContent = st.log.join("\n") || "אין אירועים עדיין";
     if (atBottom) lg.scrollTop = lg.scrollHeight;
+    var mm = st.mentionMonitor || {};
+    var hint = $("#topicActivityHint");
+    if (hint) {
+      var sourceLabel = mm.source === "recent-posts" ? "סריקת פוסטים חלופית" : (mm.source === "notifications" ? "התראות NodeBB" : "ממתין לבדיקה");
+      hint.textContent = "מקור: " + sourceLabel +
+        (mm.lastCheckAt ? " · בדיקה אחרונה: " + new Date(mm.lastCheckAt).toLocaleTimeString("he-IL") : "") +
+        (mm.lastError ? " · ההתראות הרגילות נכשלו, הסריקה החלופית פעילה" : "");
+    }
+    renderTopicActivity();
     updateReplyCycleHint(st);
     renderDrafts();
+  }
+
+  function renderTopicActivity(){
+    var box = $("#topicActivity");
+    var items = Array.isArray(data.topicActivity) ? data.topicActivity : [];
+    if (!items.length) { box.className = "note"; box.textContent = "עדיין אין פעילות מתועדת. כשהבוט יטפל בנושא, הוא יופיע כאן."; return; }
+    box.className = "";
+    box.innerHTML = "";
+    items.slice(0, 20).forEach(function(item){
+      var row = document.createElement("div"); row.className = "draft";
+      var link = document.createElement("a");
+      link.href = item.url || ((data.secrets.forumUrl || "https://mitmachim.top").replace(/\/$/, "") + "/topic/" + item.tid);
+      link.target = "_blank"; link.rel = "noopener noreferrer";
+      link.textContent = item.title || ("נושא " + item.tid);
+      var status = document.createElement("span");
+      status.className = "pill " + (item.status === "נענה" ? "ok" : (item.status === "שגיאה" ? "bad" : ""));
+      status.textContent = item.status || "בטיפול";
+      var detail = document.createElement("div"); detail.className = "note";
+      detail.textContent = "נושא " + item.tid + " · " + new Date(item.updatedAt || Date.now()).toLocaleString("he-IL") + (item.detail ? " · " + item.detail : "");
+      row.append(link, status, detail);
+      box.appendChild(row);
+    });
   }
 
   var draftsKey = "";
